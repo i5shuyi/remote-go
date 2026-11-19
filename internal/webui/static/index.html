@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Go</title>
+<style>
+  :root { color-scheme: dark; --bg:#111318; --panel:#1b1e25; --fg:#e6e8ee; --mute:#8b91a0; --acc:#4f8cff; --bad:#ff5d5d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:14px/1.4 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  #bar { position:fixed; top:0; left:0; right:0; height:40px; display:flex; align-items:center; gap:12px; padding:0 12px; background:var(--panel); border-bottom:1px solid #2a2e38; z-index:2; white-space:nowrap; overflow-x:auto; }
+  #bar .name { font-weight:600; }
+  #bar .stat { color:var(--mute); font-variant-numeric:tabular-nums; }
+  #bar .sp { flex:1; }
+  #bar label { color:var(--mute); flex-shrink:0; display:flex; align-items:center; gap:4px; }
+  #bar select, #bar button { background:#262a33; color:var(--fg); border:1px solid #343947; border-radius:6px; padding:3px 8px; font:inherit; cursor:pointer; }
+  #stage { position:fixed; top:40px; left:0; right:0; bottom:0; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100%; max-height:100%; outline:none; cursor:default; background:#000; }
+  canvas:focus { box-shadow:0 0 0 2px var(--acc); }
+  #login { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; background:var(--bg); z-index:3; }
+  #login form { background:var(--panel); padding:28px; border-radius:12px; width:300px; display:flex; flex-direction:column; gap:12px; }
+  #login h1 { margin:0; font-size:18px; }
+  #login input { font-size:22px; letter-spacing:6px; text-align:center; padding:8px; border-radius:8px; border:1px solid #343947; background:#111318; color:var(--fg); }
+  #login button { padding:9px; border:0; border-radius:8px; background:var(--acc); color:#fff; font-size:15px; cursor:pointer; }
+  #err { color:var(--bad); min-height:1.4em; }
+  .hint { color:var(--mute); font-size:12px; }
+</style>
+</head>
+<body>
+<div id="login">
+  <form id="loginForm">
+    <h1>连接远程设备</h1>
+    <div class="hint">输入被控端控制台显示的 6 位访问码</div>
+    <input id="code" inputmode="numeric" autocomplete="off" maxlength="12" autofocus>
+    <button type="submit">连接</button>
+    <div id="err"></div>
+  </form>
+</div>
+<div id="bar">
+  <span class="name" id="name">—</span>
+  <span class="stat" id="stat">未连接</span>
+  <span class="sp"></span>
+  <button id="cad" title="发送 Ctrl+Alt+Del">Ctrl+Alt+Del</button>
+  <label>画质 <select id="q"><option value="40">流畅</option><option value="70" selected>标准</option><option value="90">高清</option></select></label>
+  <label>帧率 <select id="fps"><option>5</option><option>10</option><option selected>15</option><option>30</option></select></label>
+  <label>分辨率 <select id="w"><option value="1280">1280</option><option value="1920" selected>1920</option><option value="2560">2560</option><option value="7680">原始</option></select></label>
+  <button id="fs">全屏</button>
+  <button id="disc">断开</button>
+</div>
+<div id="stage"><canvas id="cv" tabindex="0" width="1280" height="720"></canvas></div>
+<script src="viewer.js"></script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cv = $('cv');
+  let sess = null;
+  const cfg = () => ({ q:+$('q').value, fps:+$('fps').value, w:+$('w').value });
+  ['q','fps','w'].forEach(id => $(id).onchange = () => { sess && sess.setConfig(cfg()); cv.focus(); });
+
+  $('loginForm').onsubmit = e => {
+    e.preventDefault();
+    $('err').textContent = '';
+    const u = new URL('ws', location.href);
+    u.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    sess = new RemoteSession(cv, {
+      wsURL: u.toString(), code: $('code').value.trim(),
+      onOpen: () => { $('login').style.display = 'none'; sess.setConfig(cfg()); },
+      onInfo: m => { $('name').textContent = m.name; document.title = m.name + ' - Remote Go'; },
+      onStats: s => {
+        $('stat').textContent = `${s.codec || '…'} · ${s.fps} fps · ${s.mbps.toFixed(1)} Mbps · ${s.rtt} ms`
+          + (s.control ? '' : ' · 仅观看') + (s.error ? ' · ⚠️ ' + s.error : '');
+      },
+      onClose: opened => {
+        $('login').style.display = 'flex';
+        $('err').textContent = opened ? '连接已断开' : '连接失败：访问码错误或尝试过多';
+        $('stat').textContent = '未连接';
+        sess = null;
+      },
+    });
+    sess.connect();
+  };
+  $('disc').onclick = () => sess && sess.close();
+  $('cad').onclick = () => sess && sess.sendKeys(['ControlLeft', 'AltLeft', 'Delete']);
+  $('fs').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('stage').requestFullscreen();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,514 @@
+// Package host is the controlled side: it captures the screen, streams JPEG
+// frames over a WebSocket and injects the viewer's mouse/keyboard events.
+// It listens only inside a tailcat tunnel (WireGuard), never on a public
+// interface.
+package host
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/maphash"
+	"image"
+	"image/jpeg"
+	"log"
+	"math/big"
+	"net"
+	"net/http"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/kbinani/screenshot"
+	"golang.org/x/image/draw"
+
+	"github.com/i5shuyi/remote-go/internal/clipshare"
+	"github.com/i5shuyi/remote-go/internal/encoder"
+	"github.com/i5shuyi/remote-go/internal/input"
+	"github.com/i5shuyi/remote-go/internal/webui"
+)
+
+// Binary frame types (first byte of every binary WebSocket message).
+const (
+	frameJPEG     = 1
+	frameH264Key  = 2
+	frameH264Diff = 3
+)
+
+// startVideo is swappable for tests.
+var startVideo = encoder.StartH264
+
+const Port = 7900
+
+// captureRect is swappable for tests.
+var captureRect = screenshot.CaptureRect
+
+type Config struct {
+	Name     string // friendly device name shown to viewers
+	Code     string // access code; generated if empty
+	Display  int    // display index
+	ViewOnly bool   // ignore input events
+	// OnChange, if set, is called whenever a viewer connects or disconnects.
+	OnChange func()
+}
+
+// SessionInfo describes a connected viewer.
+type SessionInfo struct {
+	ID    int       `json:"id"`
+	Node  string    `json:"node"`
+	Login string    `json:"login"`
+	Since time.Time `json:"since"`
+}
+
+type liveSession struct {
+	info   SessionInfo
+	cancel context.CancelFunc
+}
+
+type Server struct {
+	cfg       Config
+	inj       input.Injector
+	clipboard clipshare.Board
+
+	mu          sync.Mutex
+	fails       int
+	lockedUntil time.Time
+	active      atomic.Int32
+	nextID      int
+	sessions    map[int]*liveSession
+}
+
+func New(cfg Config) (*Server, error) {
+	if cfg.Code == "" {
+		cfg.Code = RandomCode()
+	}
+	s := &Server{cfg: cfg, sessions: map[int]*liveSession{}}
+	if !cfg.ViewOnly {
+		inj, err := input.New()
+		if err != nil {
+			log.Printf("输入注入不可用（%v），以仅观看模式运行", err)
+		}
+		s.inj = inj
+		if inj != nil {
+			s.clipboard = clipshare.System()
+		}
+	}
+	if n := screenshot.NumActiveDisplays(); cfg.Display >= n {
+		return nil, fmt.Errorf("显示器编号 %d 不存在（共 %d 个）", cfg.Display, n)
+	}
+	return s, nil
+}
+
+func (s *Server) Code() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Code
+}
+
+// SetCode changes the access code; existing sessions stay connected.
+func (s *Server) SetCode(code string) {
+	s.mu.Lock()
+	s.cfg.Code = code
+	s.mu.Unlock()
+}
+
+// CanControl reports whether input injection is available.
+func (s *Server) CanControl() bool { return s.inj != nil }
+
+// Sessions lists connected viewers.
+func (s *Server) Sessions() []SessionInfo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]SessionInfo, 0, len(s.sessions))
+	for _, ls := range s.sessions {
+		out = append(out, ls.info)
+	}
+	return out
+}
+
+// Kick disconnects all viewers.
+func (s *Server) Kick() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ls := range s.sessions {
+		ls.cancel()
+	}
+}
+
+func (s *Server) changed() {
+	if s.cfg.OnChange != nil {
+		go s.cfg.OnChange()
+	}
+}
+
+// RandomCode returns a 6-digit access code.
+func RandomCode() string {
+	n, _ := rand.Int(rand.Reader, big.NewInt(1_000_000))
+	return fmt.Sprintf("%06d", n.Int64())
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /", http.FileServerFS(webui.HostFS()))
+	mux.HandleFunc("GET /ws", s.handleWS)
+	mux.HandleFunc("GET /api/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"name": s.cfg.Name, "os": runtime.GOOS, "control": s.inj != nil,
+		})
+	})
+	return mux
+}
+
+func (s *Server) Serve(ln net.Listener) error {
+	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	return srv.Serve(ln)
+}
+
+// who names the peer behind a connection: its address inside the tunnel.
+// (tailcat peers have no account identity; the device + verification code
+// that derived the tunnel key is the credential.)
+func (s *Server) who(ctx context.Context, remote string) (login, node string) {
+	return "", remote
+}
+
+func (s *Server) checkCode(code string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if time.Now().Before(s.lockedUntil) {
+		return errors.New("尝试次数过多，请稍后再试")
+	}
+	if code != "" && subtle.ConstantTimeCompare([]byte(code), []byte(s.cfg.Code)) == 1 {
+		s.fails = 0
+		return nil
+	}
+	s.fails++
+	if s.fails >= 5 {
+		s.fails = 0
+		s.lockedUntil = time.Now().Add(time.Minute)
+	}
+	return errors.New("访问码错误")
+}
+
+func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	login, node := s.who(r.Context(), r.RemoteAddr)
+	if err := s.checkCode(r.URL.Query().Get("code")); err != nil {
+		log.Printf("拒绝 %s (%s)：%v", node, login, err)
+		time.Sleep(500 * time.Millisecond)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		return
+	}
+	defer c.CloseNow()
+	c.SetReadLimit(clipshare.ChunkSize * 2)
+	n := s.active.Add(1)
+	defer s.active.Add(-1)
+	log.Printf("▶ %s (%s) 已连接，当前 %d 个控制端", node, login, n)
+	defer log.Printf("■ %s (%s) 已断开", node, login)
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	s.mu.Lock()
+	s.nextID++
+	id := s.nextID
+	s.sessions[id] = &liveSession{info: SessionInfo{ID: id, Node: node, Login: login, Since: time.Now()}, cancel: cancel}
+	s.mu.Unlock()
+	s.changed()
+	defer func() {
+		s.mu.Lock()
+		delete(s.sessions, id)
+		s.mu.Unlock()
+		s.changed()
+	}()
+
+	sess := &session{s: s, c: c, bounds: screenshot.GetDisplayBounds(s.cfg.Display),
+		wantH264: r.URL.Query().Get("codec") == "h264",
+		reconf:   make(chan struct{}, 1), kf: make(chan struct{}, 1)}
+	sess.quality.Store(70)
+	sess.fps.Store(15)
+	sess.maxW.Store(1920)
+	sess.run(ctx)
+}
+
+type session struct {
+	clipboard clipshare.Host
+	s         *Server
+	c         *websocket.Conn
+	bounds    image.Rectangle
+	quality   atomic.Int32
+	fps       atomic.Int32
+	maxW      atomic.Int32
+	kick      chan struct{}
+
+	wantH264 bool          // viewer can decode H.264 (WebCodecs)
+	reconf   chan struct{} // quality/fps/size changed
+	kf       chan struct{} // viewer asks for a keyframe
+}
+
+type inMsg struct {
+	clipshare.Message
+	T   string  `json:"t"`
+	X   float64 `json:"x"`
+	Y   float64 `json:"y"`
+	B   int     `json:"b"`
+	DX  float64 `json:"dx"`
+	DY  float64 `json:"dy"`
+	C   string  `json:"c"`
+	S   string  `json:"s"`
+	Q   int32   `json:"q"`
+	FPS int32   `json:"fps"`
+	W   int32   `json:"w"`
+	TS  float64 `json:"ts"`
+}
+
+func (ss *session) run(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ss.kick = make(chan struct{}, 1)
+
+	_, rich := ss.s.clipboard.(clipshare.RichBoard)
+	info, _ := json.Marshal(map[string]any{
+		"t": "info", "name": ss.s.cfg.Name, "w": ss.bounds.Dx(), "h": ss.bounds.Dy(),
+		"clipboardRich": rich && ss.s.CanControl(), "control": ss.s.inj != nil, "clipboard": ss.s.clipboard != nil && ss.s.CanControl(),
+	})
+	if err := ss.c.Write(ctx, websocket.MessageText, info); err != nil {
+		return
+	}
+	if ss.s.inj != nil {
+		defer ss.s.inj.ReleaseAll()
+	}
+	go func() {
+		defer cancel()
+		defer ss.clipboard.Close()
+		for {
+			_, data, err := ss.c.Read(ctx)
+			if err != nil {
+				return
+			}
+			var m inMsg
+			if json.Unmarshal(data, &m) == nil {
+				ss.handle(ctx, m)
+			}
+		}
+	}()
+	ss.stream(ctx)
+}
+
+func (ss *session) abs(x, y float64) (float64, float64) {
+	x, y = clamp01(x), clamp01(y)
+	return float64(ss.bounds.Min.X) + x*float64(ss.bounds.Dx()),
+		float64(ss.bounds.Min.Y) + y*float64(ss.bounds.Dy())
+}
+
+func (ss *session) handle(ctx context.Context, m inMsg) {
+	switch m.T {
+	case "clip":
+		if ctx.Err() == nil && ss.s.CanControl() && !ss.s.cfg.ViewOnly {
+			if reply := ss.clipboard.HandleContext(ctx, ss.s.clipboard, m.Message); reply != nil {
+				ss.sendJSON(ctx, reply.Packet())
+			}
+		}
+		return
+	case "cfg":
+		changed := false
+		if m.Q >= 10 && m.Q <= 95 && m.Q != ss.quality.Load() {
+			ss.quality.Store(m.Q)
+			changed = true
+		}
+		if m.FPS >= 1 && m.FPS <= 60 && m.FPS != ss.fps.Load() {
+			ss.fps.Store(m.FPS)
+			changed = true
+		}
+		if m.W >= 320 && m.W <= 7680 && m.W != ss.maxW.Load() {
+			ss.maxW.Store(m.W)
+			changed = true
+		}
+		if changed {
+			signal(ss.reconf)
+		}
+		return
+	case "kf":
+		signal(ss.kf)
+		return
+	case "ping":
+		ss.sendJSON(context.Background(), map[string]any{"t": "pong", "ts": m.TS})
+		return
+	}
+	inj := ss.s.inj
+	if inj == nil {
+		return
+	}
+	switch m.T {
+	case "mm":
+		inj.MouseMove(ss.abs(m.X, m.Y))
+	case "md", "mu":
+		x, y := ss.abs(m.X, m.Y)
+		inj.MouseButton(m.B, m.T == "md", x, y)
+	case "wh":
+		inj.Wheel(m.DX, m.DY)
+	case "kd", "ku":
+		inj.Key(m.C, m.T == "kd")
+	case "tx":
+		if len(m.S) <= 4096 {
+			inj.Text(m.S)
+		}
+	default:
+		return
+	}
+	// Input usually changes the screen; capture sooner.
+	signal(ss.kick)
+}
+
+func signal(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (ss *session) sendJSON(ctx context.Context, v any) error {
+	b, _ := json.Marshal(v)
+	return ss.c.Write(ctx, websocket.MessageText, b)
+}
+
+func (ss *session) sendFrame(ctx context.Context, typ byte, data []byte) error {
+	buf := make([]byte, 1+len(data))
+	buf[0] = typ
+	copy(buf[1:], data)
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return ss.c.Write(wctx, websocket.MessageBinary, buf)
+}
+
+func (ss *session) stream(ctx context.Context) {
+	if ss.wantH264 {
+		err := ss.streamH264(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		log.Printf("硬件编码不可用，回退到 JPEG：%v", err)
+	}
+	if ss.sendJSON(ctx, map[string]any{"t": "video", "codec": "jpeg"}) != nil {
+		return
+	}
+	ss.streamJPEG(ctx)
+}
+
+// streamH264 runs the hardware pipeline. It returns an error (so the caller
+// falls back to JPEG) only if the encoder cannot start or stops by itself.
+func (ss *session) streamH264(ctx context.Context) error {
+	for {
+		v, err := startVideo(encoder.Options{Display: ss.s.cfg.Display, MaxWidth: int(ss.maxW.Load()),
+			FPS: int(ss.fps.Load()), Quality: int(ss.quality.Load())})
+		if err != nil {
+			return err
+		}
+		w, h := v.Size()
+		if err := ss.sendJSON(ctx, map[string]any{"t": "video", "codec": "h264", "w": w, "h": h}); err != nil {
+			v.Close()
+			return nil
+		}
+		restart, err := ss.pumpH264(ctx, v)
+		v.Close()
+		if !restart {
+			return err
+		}
+	}
+}
+
+func (ss *session) pumpH264(ctx context.Context, v encoder.Video) (restart bool, err error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return false, nil
+		case <-v.Done():
+			return false, v.Err()
+		case <-ss.reconf:
+			return true, nil
+		case <-ss.kf:
+			v.RequestKeyframe()
+		case f := <-v.Frames():
+			typ := byte(frameH264Diff)
+			if f.Key {
+				typ = frameH264Key
+			}
+			if ss.sendFrame(ctx, typ, f.Data) != nil {
+				return false, nil
+			}
+		}
+	}
+}
+
+func (ss *session) streamJPEG(ctx context.Context) {
+	var (
+		seed     = maphash.MakeSeed()
+		lastHash uint64
+		lastSent time.Time
+		buf      bytes.Buffer
+		scaled   *image.RGBA
+		errShown bool
+	)
+	for ctx.Err() == nil {
+		start := time.Now()
+		img, err := captureRect(ss.bounds)
+		if err != nil {
+			if !errShown {
+				errShown = true
+				log.Printf("截屏失败: %v", err)
+				msg, _ := json.Marshal(map[string]string{"t": "error", "msg": "截屏失败: " + err.Error()})
+				ss.c.Write(ctx, websocket.MessageText, msg)
+			}
+		} else {
+			h := maphash.Bytes(seed, img.Pix)
+			// Skip unchanged frames, but resend periodically as a keepalive.
+			if h != lastHash || time.Since(lastSent) > 3*time.Second {
+				lastHash = h
+				var src image.Image = img
+				if mw := int(ss.maxW.Load()); img.Bounds().Dx() > mw {
+					nh := img.Bounds().Dy() * mw / img.Bounds().Dx()
+					if scaled == nil || scaled.Bounds().Dx() != mw || scaled.Bounds().Dy() != nh {
+						scaled = image.NewRGBA(image.Rect(0, 0, mw, nh))
+					}
+					draw.ApproxBiLinear.Scale(scaled, scaled.Bounds(), img, img.Bounds(), draw.Src, nil)
+					src = scaled
+				}
+				buf.Reset()
+				if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: int(ss.quality.Load())}); err == nil {
+					if ss.sendFrame(ctx, frameJPEG, buf.Bytes()) != nil {
+						return
+					}
+					lastSent = time.Now()
+				}
+			}
+		}
+		interval := time.Second / time.Duration(max(ss.fps.Load(), 1))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(interval - time.Since(start)):
+		case <-ss.kick:
+			// small delay so the UI has a moment to react to the input
+			time.Sleep(15 * time.Millisecond)
+		}
+	}
+}
+
+func clamp01(v float64) float64 { return min(max(v, 0), 1) }
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}

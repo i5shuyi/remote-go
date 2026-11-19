@@ -1,0 +1,66 @@
+// Package keymap turns the controlling machine's physical key codes into
+// the KeyboardEvent.code names the host's protocol uses ("KeyA",
+// "ShiftLeft", "ArrowUp"…). Physical codes keep the remote keyboard
+// layout-independent, as UU Remote and RDP do.
+package keymap
+
+// FromMac returns the code for a macOS virtual keycode (kVK_*), or "".
+func FromMac(vk uint16) string { return mac[vk] }
+
+// FromWinScan returns the code for a Windows set-1 scancode, with ext for
+// the E0 prefix (lParam bit 24 of WM_KEYDOWN), or "".
+func FromWinScan(scan uint16, ext bool) string {
+	if ext {
+		return winExt[scan]
+	}
+	return win[scan]
+}
+
+var mac = map[uint16]string{
+	0x00: "KeyA", 0x01: "KeyS", 0x02: "KeyD", 0x03: "KeyF", 0x04: "KeyH", 0x05: "KeyG",
+	0x06: "KeyZ", 0x07: "KeyX", 0x08: "KeyC", 0x09: "KeyV", 0x0A: "IntlBackslash", 0x0B: "KeyB",
+	0x0C: "KeyQ", 0x0D: "KeyW", 0x0E: "KeyE", 0x0F: "KeyR", 0x10: "KeyY", 0x11: "KeyT",
+	0x12: "Digit1", 0x13: "Digit2", 0x14: "Digit3", 0x15: "Digit4", 0x16: "Digit6", 0x17: "Digit5",
+	0x18: "Equal", 0x19: "Digit9", 0x1A: "Digit7", 0x1B: "Minus", 0x1C: "Digit8", 0x1D: "Digit0",
+	0x1E: "BracketRight", 0x1F: "KeyO", 0x20: "KeyU", 0x21: "BracketLeft", 0x22: "KeyI", 0x23: "KeyP",
+	0x24: "Enter", 0x25: "KeyL", 0x26: "KeyJ", 0x27: "Quote", 0x28: "KeyK", 0x29: "Semicolon",
+	0x2A: "Backslash", 0x2B: "Comma", 0x2C: "Slash", 0x2D: "KeyN", 0x2E: "KeyM", 0x2F: "Period",
+	0x30: "Tab", 0x31: "Space", 0x32: "Backquote", 0x33: "Backspace", 0x35: "Escape",
+	0x36: "MetaRight", 0x37: "MetaLeft", 0x38: "ShiftLeft", 0x39: "CapsLock", 0x3A: "AltLeft",
+	0x3B: "ControlLeft", 0x3C: "ShiftRight", 0x3D: "AltRight", 0x3E: "ControlRight",
+	0x41: "NumpadDecimal", 0x43: "NumpadMultiply", 0x45: "NumpadAdd", 0x47: "NumLock",
+	0x4B: "NumpadDivide", 0x4C: "NumpadEnter", 0x4E: "NumpadSubtract", 0x51: "NumpadEqual",
+	0x52: "Numpad0", 0x53: "Numpad1", 0x54: "Numpad2", 0x55: "Numpad3", 0x56: "Numpad4",
+	0x57: "Numpad5", 0x58: "Numpad6", 0x59: "Numpad7", 0x5B: "Numpad8", 0x5C: "Numpad9",
+	0x60: "F5", 0x61: "F6", 0x62: "F7", 0x63: "F3", 0x64: "F8", 0x65: "F9", 0x67: "F11",
+	0x69: "F13", 0x6B: "F14", 0x6D: "F10", 0x6E: "ContextMenu", 0x6F: "F12", 0x71: "F15",
+	0x72: "Insert", 0x73: "Home", 0x74: "PageUp", 0x75: "Delete", 0x76: "F4", 0x77: "End",
+	0x78: "F2", 0x79: "PageDown", 0x7A: "F1", 0x7B: "ArrowLeft", 0x7C: "ArrowRight",
+	0x7D: "ArrowDown", 0x7E: "ArrowUp",
+}
+
+var win = map[uint16]string{
+	0x01: "Escape", 0x02: "Digit1", 0x03: "Digit2", 0x04: "Digit3", 0x05: "Digit4", 0x06: "Digit5",
+	0x07: "Digit6", 0x08: "Digit7", 0x09: "Digit8", 0x0A: "Digit9", 0x0B: "Digit0", 0x0C: "Minus",
+	0x0D: "Equal", 0x0E: "Backspace", 0x0F: "Tab", 0x10: "KeyQ", 0x11: "KeyW", 0x12: "KeyE",
+	0x13: "KeyR", 0x14: "KeyT", 0x15: "KeyY", 0x16: "KeyU", 0x17: "KeyI", 0x18: "KeyO", 0x19: "KeyP",
+	0x1A: "BracketLeft", 0x1B: "BracketRight", 0x1C: "Enter", 0x1D: "ControlLeft", 0x1E: "KeyA",
+	0x1F: "KeyS", 0x20: "KeyD", 0x21: "KeyF", 0x22: "KeyG", 0x23: "KeyH", 0x24: "KeyJ", 0x25: "KeyK",
+	0x26: "KeyL", 0x27: "Semicolon", 0x28: "Quote", 0x29: "Backquote", 0x2A: "ShiftLeft",
+	0x2B: "Backslash", 0x2C: "KeyZ", 0x2D: "KeyX", 0x2E: "KeyC", 0x2F: "KeyV", 0x30: "KeyB",
+	0x31: "KeyN", 0x32: "KeyM", 0x33: "Comma", 0x34: "Period", 0x35: "Slash", 0x36: "ShiftRight",
+	0x37: "NumpadMultiply", 0x38: "AltLeft", 0x39: "Space", 0x3A: "CapsLock",
+	0x3B: "F1", 0x3C: "F2", 0x3D: "F3", 0x3E: "F4", 0x3F: "F5", 0x40: "F6", 0x41: "F7",
+	0x42: "F8", 0x43: "F9", 0x44: "F10", 0x45: "NumLock", 0x46: "ScrollLock",
+	0x47: "Numpad7", 0x48: "Numpad8", 0x49: "Numpad9", 0x4A: "NumpadSubtract", 0x4B: "Numpad4",
+	0x4C: "Numpad5", 0x4D: "Numpad6", 0x4E: "NumpadAdd", 0x4F: "Numpad1", 0x50: "Numpad2",
+	0x51: "Numpad3", 0x52: "Numpad0", 0x53: "NumpadDecimal", 0x56: "IntlBackslash",
+	0x57: "F11", 0x58: "F12",
+}
+
+var winExt = map[uint16]string{
+	0x1C: "NumpadEnter", 0x1D: "ControlRight", 0x35: "NumpadDivide", 0x37: "PrintScreen",
+	0x38: "AltRight", 0x45: "NumLock", 0x47: "Home", 0x48: "ArrowUp", 0x49: "PageUp",
+	0x4B: "ArrowLeft", 0x4D: "ArrowRight", 0x4F: "End", 0x50: "ArrowDown", 0x51: "PageDown",
+	0x52: "Insert", 0x53: "Delete", 0x5B: "MetaLeft", 0x5C: "MetaRight", 0x5D: "ContextMenu",
+}

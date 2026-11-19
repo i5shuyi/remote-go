@@ -1,0 +1,5 @@
+bin/
+/remote-go
+*.exe
+.DS_Store
+.nsgo/android/*.pem

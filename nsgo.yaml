@@ -1,0 +1,13 @@
+name: Remote Go
+id: dev.remotego.app
+version: 0.3.0
+
+release:
+  github: i5shuyi/remote-go
+updates:
+  channel: direct
+  automatic: true
+  key: Uq519xa4Yr2gx4E4PZ34BD2Yl22g1YsQ/M72398rmUY=
+apple:
+  info:
+    NSAppleEventsUsageDescription: Remote Go 需要控制键盘鼠标以响应远程操作。
