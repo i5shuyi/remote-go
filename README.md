@@ -1,194 +1,194 @@
 # remote-go
 
-一个用 Go 写的、类似 UU 远程的远程桌面原型。**没有任何服务器，也不需要注册账号**：两端都内嵌 [tailcat](https://github.com/tailscale/tailcat)。tailcat 是 Tailscale 的数据面（WireGuard、magicsock NAT 打洞、DERP 中继），去掉了控制面，所以不需要登录。连接只靠 UU 远程那样的「设备代码 + 验证码」。
+**English** · [简体中文](README.zh-CN.md)
 
-```
- 控制端 (Remote Go)                                         被控端
- ┌──────────────────────────┐   WireGuard (P2P UDP 直连)  ┌────────────────────────┐
- │ NSGo 原生界面             │ ═════════════════════════▶ │ tailcat 节点 :7900      │
- │ 远程画面: 原生视图硬件解码 │   打洞失败时经公共 DERP 中继 │ 截屏 → GPU H.264 → WS   │
- │ tailcat 客户端            │                             │ 键鼠注入                │
- └──────────────────────────┘                             └────────────────────────┘
-        两端用设备代码、验证码和对应的中继配置算出同一个 tailcat 地址
-```
+Remote Go is a remote desktop prototype written in Go. To connect, enter the device code and verification code shown on the computer you want to control. Both endpoints embed [tailcat](https://github.com/tailscale/tailcat), which provides Tailscale's WireGuard transport, NAT traversal, and DERP relays without its control plane. You can use the public relays without creating an account or running a server.
 
-## 连接原理
-
-tailcat 的地址由「节点公钥 + 预共享密钥 + DERP 区域」完全确定（disco 密钥也由节点密钥推导），所以两端可以各自算出它（`internal/tunnel`）：
-
-```
-设备代码 = 8 位随机数字 + 1 位区域编号（1 纽约 · 2 旧金山 · 3 法兰克福 · 4 东京 → DERP 301–304，0 自建 DERP）
-验证码   = 被控端当前的密码（8 位，随机或固定）
-Argon2id(验证码, salt = "remote-go/tailcat/v1|" + 设备代码, t=3, m=64MiB, p=4) → 64 字节
-         = WireGuard 节点私钥 (32) ‖ WireGuard 预共享密钥 (32)
+```text
+Controller (Remote Go)                              Host
+┌─────────────────────────────┐                     ┌────────────────────────────┐
+│ Native NSGo interface       │   WireGuard tunnel  │ tailcat node, port 7900    │
+│ Native video decoding       │ ◀═════════════════▶ │ Screen → GPU H.264 → WS    │
+│ tailcat client              │  Direct UDP or DERP │ Keyboard and mouse input   │
+└─────────────────────────────┘                     └────────────────────────────┘
 ```
 
-- **被控端**用这把私钥启动 tailcat 服务器，挂在设备代码指定的 DERP 区域（默认首次启动时测速，也可在设置中指定），在隧道内监听 7900 端口。
-- **控制端**用同样的输入算出地址，先 ping，再经隧道拨 WebSocket。magicsock 先走 DERP，随后尝试打洞升级为 P2P 直连；会话窗口的控制球菜单显示「P2P 直连」或「中继 XXX」。
-- 代码不对时，算出的就是另一把不存在的公钥，结果和「对方不在线」一样。
-- 更换验证码会让被控端换一把密钥重启，旧验证码和已有连接立即失效。
+## How connections work
 
-## 配置 tailcat 中继
+The node public key, preshared key, and DERP region determine the tailcat address. The discovery key also derives from the node key. Given the same device code, verification code, and relay configuration, both endpoints can derive the address independently. The derivation lives in `internal/tunnel`.
 
-桌面端打开 **设置 → 本机引导中继**，选择后点击 **应用**。
+```text
+Device code       = 8 random digits + 1 region digit
+                    (1 New York, 2 San Francisco, 3 Frankfurt, 4 Tokyo → DERP 301–304,
+                     0 for a self-hosted relay)
+Verification code = current host password (8 characters by default, random or user-set)
+Argon2id(verification code, salt = "remote-go/tailcat/v1|" + device code, t=3, m=64MiB, p=4)
+                  → 64 bytes = WireGuard node private key (32) ‖ WireGuard preshared key (32)
+```
 
-- **自动选择**会测速选择公共中继，并记住结果，让设备代码在重启后保持稳定。
-- **公共区域**可选纽约、旧金山、法兰克福或东京。控制端根据设备代码末位找到对应区域。
-- **自建**需在「自建 DERP 地址」填写运行 derper 的主机名或地址，例如 `derp.example.com:8443`。默认使用 TLS 端口 443，证书须受客户端信任并匹配主机名。设备代码末位为 `0`。桌面控制端在「设置」、安卓控制端在首页「自建 DERP 地址」保存相同地址即可连接。控制端可以保留自己的公共中继选择。
+- The **host** starts tailcat with the derived private key, joins the DERP region in its device code, and listens on port 7900 inside the tunnel. On first launch it measures relay latency unless you select a relay in Settings.
+- The **controller** derives the address, pings the host, and opens a WebSocket through the tunnel. The magicsock transport starts on DERP and attempts a direct UDP connection through NAT. The floating control button in the session window shows the active route.
+- An incorrect code derives a different public key. From the controller, the result looks the same as an offline host.
+- Changing the verification code restarts the host with a new key, immediately invalidating the old code and disconnecting existing sessions.
 
-更换本机中继会重启被控服务，断开正在控制本机的连接。设备代码前八位保留，请把更新后的完整代码告诉对方。更换自建服务器地址时，控制端也需要更新保存的地址。末位为 1–9 的旧设备代码继续走各自的公共中继。
+## Configure a tailcat relay
 
-## 桌面客户端（类似 UU 远程）
+On the desktop, open **Settings → Local bootstrap relay** (设置 → 本机引导中继), choose a relay, and click **Apply** (应用).
+
+- **Automatic** measures latency to the public relays and saves the selection so the device code stays the same across restarts.
+- **Public region** lets you choose New York, San Francisco, Frankfurt, or Tokyo. The controller reads the region from the last digit of the host's device code.
+- **Self-hosted** uses your own DERP server. Enter its hostname and optional port (for example, `derp.example.com:8443`) in **自建 DERP 地址**. The default TLS port is 443. The certificate must match the hostname and be trusted by the client. The resulting device code ends in `0`. Save the same address in desktop Settings or on the Android home screen. The controller can keep its own public relay selection for incoming connections.
+
+Changing the local relay restarts the host service and disconnects anyone controlling that computer. The first eight digits stay the same. Share the updated full device code with the other person. If you change your self-hosted relay address, update the address on the controller as well. Older device codes ending in 1–9 still use their original public relays.
+
+## Desktop client
+
+Download an installer from [GitHub Releases](https://github.com/i5shuyi/remote-go/releases/latest), or build one locally.
 
 ```bash
-sh scripts/build.sh mac       # → bin/build-mac/<版本>/releases/*.dmg
-sh scripts/build.sh windows   # → bin/build-windows/<版本>/releases/*-setup.exe（需要 makensis）
+sh scripts/build.sh mac       # → bin/build-mac/<version>/releases/*.dmg
+sh scripts/build.sh windows   # → bin/build-windows/<version>/releases/*-setup.exe (requires makensis)
 ```
 
-打开后不需要登录：
+1. On the **host**, the left card shows a nine-digit **device code** and an eight-character **verification code** by default. You can copy the codes, generate a new verification code, or set a fixed password in Settings. The lower-left corner shows the relay region.
+2. On the **controller**, enter the host's device code on the right, click **Connect** (连接), and enter the verification code. Each host opens in its own session window. The desktop fills the window, with a floating **•••** control button in the upper-right corner. Drag it anywhere. Release it near an edge to snap it there, or release it in the middle to leave it in place. Click it to see the codec, frame rate, bit rate, latency, and connection route. The menu also lets you adjust quality, frame rate, or resolution, enter full screen, send Ctrl+Alt+Del, or disconnect. Keyboard input goes to the host as soon as the session opens or the menu closes.
+3. To copy between devices, enable **Shared clipboard** (共享剪贴板) in the floating button's menu. Text, screenshots, and regular files copied afterward sync in both directions. Copy a screenshot and press ⌘V or Ctrl+V in a remote chat that accepts images. To paste one or more copied files, open the destination folder in Finder or File Explorer. If you press paste during a transfer, the client waits for the receiver to acknowledge the files before sending the keystroke. Sharing starts off for each session, including after reconnecting, and is disabled in view-only sessions. Older peers with text-only clipboard support sync text.
+4. Click a device under **Recent connections** (最近连接) to reconnect. When someone is controlling your computer, a banner at the top lets you disconnect them.
+5. Closing the main window leaves the host running in the macOS menu bar or Windows notification area. Use its menu to reopen the window or quit. On macOS you can also quit with ⌘Q.
+6. If the peer quits or loses its network connection, the session detects the missing heartbeat within six seconds. The disconnect screen shows the reason and lets you reconnect.
 
-1. **被控端**左侧卡片显示 9 位**设备代码**和 8 位**验证码**，可以一键复制、更换验证码，或在设置里改成固定密码。左下角显示 tailcat 用的中继区域。
-2. **控制端**在右侧输入对方的设备代码，点「连接」，再输入验证码，就会打开一个独立的远程会话窗口（可以同时连多台）。远程画面占满窗口，「•••」控制球默认位于右上角，可拖动；靠近任一边缘松手会吸附，拖到中间松手则停在原处。点击控制球可查看编码、帧率、码率、延迟和直连/中继状态，调整画质、帧率、分辨率，或使用全屏、Ctrl+Alt+Del 和断开连接。打开会话或收起菜单后即可直接使用键盘。
-   在控制球菜单中手动勾选 **共享剪贴板**。此后复制的文字、截图和普通文件会双向同步。截图复制到剪贴板后，可在支持图片粘贴的远端聊天框中按 ⌘V 或 Ctrl+V。复制一个或多个文件后，可在远端 Finder 或资源管理器的目标文件夹粘贴。传输过程中按下粘贴快捷键，会等远端确认接收后再执行。
-   每个会话默认关闭，重连要重新开启。仅观看会话禁用共享。与仅支持文字剪贴板的旧版连接时，会自动使用文字同步。
-3. 「最近连接」记住连过的设备，点一下即可重连。
-4. 有人在控制本机时，顶部会出现提示条，可以一键断开。
-5. 关闭主窗口不会退出，程序会留在菜单栏（Windows 是通知区域）继续允许远程控制，在那里可以重新打开窗口或退出。要真正退出，用托盘菜单的「退出」或 Cmd+Q。
-6. 对方退出或断网后，会话窗口在 6 秒内（收不到心跳就判定）换成「远程会话已断开」页面，说明原因，可以一键重新连接。
+The desktop interface uses AppKit views on macOS and Direct2D on Windows. The remote screen is a native component registered with NSGo (`internal/screen`, `core.Native`). [NSGo](https://github.com/nsgo-dev/nsgo)
 
-界面用 [NSGo](https://github.com/nsgo-dev/nsgo) 绘制：macOS 上是 AppKit 原生视图，Windows 上是 Direct2D，没有 WebView。远程画面是注册给 NSGo 的原生组件（`internal/screen`，`core.Native`）：
+- **macOS** uses an `NSView` with an `AVSampleBufferDisplayLayer`. The client converts Annex-B video into AVCC-formatted `CMSampleBuffer` objects for VideoToolbox hardware decoding. The system compositor displays the result without a CPU copy. The view handles native keyboard and mouse events, including physical key codes, left and right modifiers, and Command shortcuts.
+- **Windows** embeds a child `HWND` in the NSGo window. A Media Foundation H.264 decoder (MFT) outputs NV12, which the client converts to BGRA and scales with GDI. Keyboard input uses layout-independent scan codes.
 
-- **macOS**：`NSView` + `AVSampleBufferDisplayLayer`。Annex-B 转成 AVCC 的 `CMSampleBuffer` 后交给 VideoToolbox 硬件解码，由系统合成器直接显示，不经过 CPU 拷贝。键鼠在视图里直接拿原生事件（物理键码，含左右修饰键、Command 快捷键）。
-- **Windows**：NSGo 窗口里的子 `HWND`。Media Foundation H.264 解码器（MFT）输出 NV12，转成 BGRA 后用 GDI 缩放显示；键盘按扫描码转换，与布局无关。
+The Go session client (`internal/client`) opens its WebSocket directly through the tailcat tunnel. Use these environment variables for development and debugging.
 
-会话客户端是 Go 写的（`internal/client`），通过 tailcat 隧道直接拨 WebSocket，不经过本地代理。
+| Variable | Effect |
+| --- | --- |
+| `RG_DEV_CONNECT=<device-code>/<verification-code>` | Connect through tailcat at startup. |
+| `RG_DEV_SESSION=127.0.0.1:7900/<verification-code>` | Connect directly to a local test host started with `remote-go local`. |
+| `RG_VERBOSE=1` | Print tailcat logs. |
+| `RG_SCREEN_DEBUG=1` | Print decoder status. |
+| `RG_DEV_SNAPSHOT=<directory>` | Save window snapshots as PNG files (macOS only). |
 
-开发调试用的环境变量：
-
-- `RG_DEV_CONNECT=<设备代码>/<验证码>`：启动时经 tailcat 连接。
-- `RG_DEV_SESSION=127.0.0.1:7900/<验证码>`：不走隧道，直连本机测试被控端（`remote-go local`）。
-- `RG_VERBOSE=1`：打印 tailcat 日志。
-- `RG_SCREEN_DEBUG=1`：打印解码状态。
-- `RG_DEV_SNAPSHOT=<目录>`（仅 macOS）：把窗口截图存成 PNG。
-
-端到端测试（需要联网，会用到公共 DERP）：
+The end-to-end tests require internet access to a public DERP relay. The second command starts a host with a test pattern and prints the codes you can use to connect from the desktop client.
 
 ```bash
 RG_TAILCAT_E2E=1 go test ./internal/tunnel -run TestTailcat -v
 RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 ```
 
-第二条起一个测试画面的被控端，并打印设备代码和验证码，供桌面客户端连接。`RG_SCREEN_DEBUG=1` 打印解码状态，`RG_DEV_SNAPSHOT=<目录>`（仅 macOS）把窗口截图存成 PNG。
-
-## 安卓客户端（仅控制端）
+## Android client (controller only)
 
 ```bash
 sh scripts/build.sh android
 adb install -r bin/build-android/0.3.0/releases/remote-go-0.3.0-android-arm64.apk
 ```
 
-构建 APK 需要 Python 3.9+、JDK 17+、Android SDK（platform 34 或更高）及带 d8 的 Build Tools 36+。可通过 `ANDROID_HOME` 指定 SDK 路径。
+Building the APK requires Python 3.9+, JDK 17+, Android SDK Platform 34 or later, and Build Tools 36+ with d8. Use `ANDROID_HOME` to specify the SDK location.
 
-安卓版只用来控制电脑，不能被控。打开后输入电脑上显示的设备代码和验证码就能连接，最近连过的设备会记在列表里。
+Use Android to control a computer by entering the codes shown on its desktop. Recently connected computers appear on the home screen.
 
-- **画面**：NSGo 的安卓运行时不能嵌入应用自己的原生视图，所以远程画面放在一个 WebView 里（`internal/mobile/player.html`）。Go 负责经 tailcat 收流，再把每帧 H.264 发给页面；页面用 WebCodecs 解码，Android System WebView 底层走 MediaCodec 硬件解码。页面跟不上时会丢掉差分帧，并请求关键帧重新同步。
-- **操作**：控制球默认位于右上角，可拖动，靠近边缘松手后吸附。点按控制球展开工具栏，里面有键盘、操作模式、适应屏幕、Ctrl+Alt+Del、画质 / 帧率和断开。
-  - 触控模式：轻点是左键，长按是右键，单指拖动是拖拽。
-  - 触摸板模式：单指移动光标，轻点是左键，双指轻点是右键，轻点后按住拖动是拖拽。
-  - 两种模式都是双指滑动滚动、双指张合缩放（最大 5 倍）。
-- **共享剪贴板**：在会话面板中手动开启。手机复制文字、截图或文件后，回到远程会话即可同步到电脑。手机文件管理器需要将文件放入 Android 系统剪贴板；只在应用内执行的复制操作无法跨应用读取。
-- **键盘**：输入框里打的字以 Unicode 文本发给被控端（新增的 `tx` 消息：macOS 用 `CGEventKeyboardSetUnicodeString`，Windows 用 `KEYEVENTF_UNICODE`），所以中文输入法不受对方键盘布局影响。上方一排是软键盘没有的 Esc、Tab、方向键、Del、Home/End、F5 等；Ctrl / Alt / Shift / ⌘(Win) 点一下会粘住，对下一个键生效，用来按快捷键。
-- **网络**：Go 程序在安卓上以普通可执行文件运行，系统不让它读网卡列表。tailcat 引入了 tailscale 的 `androidbin` / `androiddns` 来补上网卡和 DNS。
-- 会话中屏幕保持常亮，系统返回键依次收起键盘、收起工具栏，最后询问是否断开。断线后的处理与桌面版相同，可以一键重连。
-- 不用安卓机也能调试界面：`RG_MOBILE=1 ./remote-go` 在桌面上打开手机尺寸的同一套界面，macOS 的 WKWebView 同样支持 WebCodecs。
+- **Video.** The NSGo Android runtime cannot embed an application-provided native view, so the client displays video in a WebView (`internal/mobile/player.html`). Go receives H.264 frames over tailcat and passes them to the page. WebCodecs decodes them through Android System WebView's MediaCodec hardware backend. If playback falls behind, the page drops delta frames and requests a keyframe.
+- **Controls.** The floating button starts in the upper-right corner. Drag it and release it near an edge to snap it into place. Tap it for the keyboard, input mode, fit-to-screen, Ctrl+Alt+Del, quality, frame rate, and disconnect controls.
+  - In touch mode, tap to left-click, press and hold to right-click, and drag with one finger to drag on the remote desktop.
+  - In trackpad mode, move one finger to move the pointer, tap to left-click, tap with two fingers to right-click, and tap then press and drag to drag an item.
+  - In either mode, scroll with two fingers or pinch to zoom up to 5×.
+- **Shared clipboard.** Enable sharing manually in the session panel. After copying text, a screenshot, or files on the phone, return to the session to sync them to the computer. File managers must put files on the Android system clipboard for sharing to work. A copy held inside another app is inaccessible to Remote Go.
+- **Keyboard.** The input field sends Unicode text in a `tx` message. The host uses `CGEventKeyboardSetUnicodeString` on macOS and `KEYEVENTF_UNICODE` on Windows, so Chinese input works independently of the host keyboard layout. An extra row supplies Esc, Tab, arrows, Del, Home/End, F5, and other keys. Tap Ctrl, Alt, Shift, or ⌘ (Win) to apply the modifier to the next key.
+- **Networking.** The Go program runs as a regular Android executable with restricted access to the network interface list. tailcat uses Tailscale's `androidbin` and `androiddns` packages for interface discovery and DNS.
+- The screen stays awake during a session. The Android Back button dismisses the keyboard, then the toolbar, then asks whether to disconnect. As on desktop, you can reconnect from the disconnect screen.
+- To debug the mobile layout on a desktop, run `RG_MOBILE=1 ./remote-go`. It opens the same interface in a phone-sized window. WKWebView on macOS also supports WebCodecs.
 
-## 在线更新与发布
+## Updates and releases
 
-从 0.3.0 起，桌面「设置」和安卓首页「默认设置」会显示当前版本，并提供「检查更新」。正式安装包默认每天检查一次。发现新版后，macOS 通过 Sparkle 更新应用，Windows 通过 WinSparkle 更新当前用户安装的程序，Android 在验证 APK 后打开系统安装界面。0.2.x 及更早的用户需要手动安装一次含更新器的版本。
+Starting with 0.3.0, desktop **Settings** (设置) and Android **Default settings** (默认设置) show the current version and offer **Check for updates** (检查更新). Release builds check daily by default. macOS updates through Sparkle. Windows updates the current user's installation through WinSparkle. Android verifies the APK and opens the system installer. Users on 0.2.x or earlier need to install a version with the updater manually once.
 
-每个系统和架构分别从 GitHub Releases 的 Latest 读取 `appcast-<目标>.xml`。清单链接到对应标签下的完整安装包，包使用 Ed25519 签名。发布者按以下步骤出包：
+Each OS and architecture reads its own `appcast-<target>.xml` from the latest GitHub Release. The feed points to the full installer under the corresponding version tag. Each package has an Ed25519 signature.
 
-1. 在 `nsgo.yaml` 提升 `version`，标签使用 `v<版本>`。构建机需要 macOS、Go、Xcode 命令行工具、Python 3.9+、NSIS 和上文的 Android 构建工具。
-2. 运行 `sh scripts/build.sh release`。构建脚本从环境变量 `NSGO_UPDATES_KEY` 或本机的 `~/.config/remote-go/updates.key` 读取发布私钥，安装包内置对应公钥。Android 发布还需要沿用原来的 APK 签名身份，本项目此前使用的签名文件是 `.nsgo/android/debug.pem`。这两份私钥均需独立备份。
-3. 将 `bin/signed/<版本>/releases/` 下的四份 XML、四个安装包及其校验文件一起上传到 `i5shuyi/remote-go` 同一标签的 GitHub Release，检查附件齐全后发布为公开的 Latest。草稿阶段不会触发已安装客户端更新。构建脚本本身只生成和验证本地文件。
+1. Bump `version` in `nsgo.yaml` and use `v<version>` for the release tag. The build machine needs macOS, Go, the Xcode command line tools, Python 3.9+, NSIS, and the Android build tools listed above.
+2. Run `sh scripts/build.sh release`. The script reads the release signing key from `NSGO_UPDATES_KEY` or `~/.config/remote-go/updates.key`. The application embeds the corresponding public key. Android releases must also use the same APK signing identity as earlier builds. This project previously used `.nsgo/android/debug.pem`. Back up both private keys separately.
+3. Upload the four XML feeds, four installers, and their checksum files from `bin/signed/<version>/releases/` to the same tagged GitHub Release in `i5shuyi/remote-go`. Verify the assets are complete, then publish the release as **Latest**. Draft releases do not trigger client updates. The build script generates and verifies files locally.
 
-## 命令行用法
+## Command-line usage
 
-不带参数运行就是桌面客户端；带子命令时是无界面的命令行模式，适合服务器或无人值守的机器：
+Run the binary without arguments to open the desktop client. Subcommands run without a desktop window and can be used on servers or unattended machines.
 
 ```bash
 go build -o remote-go .
-./remote-go host -p mypassword               # 被控端：打印设备代码和验证码
-./remote-go view -p mypassword 868987922     # 控制端：经 tailcat 连接，在浏览器里打开控制界面（WebCodecs 解码）
-./remote-go local                            # 不走隧道，只在本机 127.0.0.1 测试
-./remote-go host -region 304                 # 选择东京公共中继
+./remote-go host -p mypassword               # Start a host and print its device and verification codes
+./remote-go view -p mypassword 868987922     # Connect over tailcat and open the browser controller (WebCodecs)
+./remote-go local                            # Test on 127.0.0.1 without a tunnel
+./remote-go host -region 304                 # Use the Tokyo public relay
 ./remote-go host -derp derp.example.com:8443
-./remote-go view -derp derp.example.com:8443 -p mypassword 123456780  # 换成被控端显示的代码和验证码
+./remote-go view -derp derp.example.com:8443 -p mypassword 123456780  # Substitute the host's codes
 ```
 
-| 选项 | 说明 |
+| Option | Purpose |
 | --- | --- |
-| `host -region 304` | 指定公共中继，省略则按固定设备代码或自动测速选择 |
-| `host/view -derp 主机[:端口]` / `RG_DERP` | 自建 DERP，两端使用同一地址；固定设备代码时末位须与中继匹配 |
-| `host -device 123456782` / `RG_DEVICE` | 固定设备代码（默认测速选最近的区域后随机生成） |
-| `host -p xxxx` / `RG_PASSWORD` | 固定验证码（默认每次启动随机生成） |
-| `host -view-only` | 仅观看，不接受键鼠控制 |
-| `host -display 1` | 选择共享的显示器 |
-| `host -name 办公室` | 显示给对方的设备名 |
-| `-v` | 打印 tailcat 诊断日志 |
-| `view -listen 127.0.0.1:0 -no-open` | 本地代理的监听地址；不自动打开浏览器 |
+| `host -region 304` | Select a public relay. If omitted, the host uses the fixed device code's region or measures relay latency. |
+| `host/view -derp host[:port]` / `RG_DERP` | Use the same self-hosted DERP address on both endpoints. A fixed device code must end in the digit for the selected relay. |
+| `host -device 123456782` / `RG_DEVICE` | Set a fixed device code. By default the host generates a code after choosing the closest region by latency. |
+| `host -p xxxx` / `RG_PASSWORD` | Set a fixed verification code. The default is a new random code on each start. |
+| `host -view-only` | Allow viewing only and disable remote keyboard and mouse input. |
+| `host -display 1` | Select the display to share. |
+| `host -name Office` | Set the device name shown to the controller. |
+| `-v` | Print tailcat diagnostic logs. |
+| `view -listen 127.0.0.1:0 -no-open` | Set the local proxy's listen address and suppress automatic browser launch. |
 
-## 安全模型
+## Security model
 
-1. **传输**：WireGuard（Noise IK + 预共享密钥）端到端加密，DERP 中继只能看到密文和公钥。被控端没有任何公网监听端口。
-2. **寻址即认证**：不知道设备代码和验证码，就算不出节点公钥和预共享密钥，连握手都无法完成。DERP 不提供列出节点的功能。
-3. **抗离线猜测**：每次尝试都要做一次 Argon2id（64 MiB 内存）。攻击者必须先拿到设备代码，才能针对它离线穷举；默认验证码 8 位 × 31 个字符 ≈ 2^39.6。想要更强，在设置里设置更长的固定密码即可。
-4. **在线猜测**：每次猜错只是一次没人应答的握手，被控端感知不到，所以没法限速。安全性完全靠验证码的熵和 Argon2 的成本，**不要用短而常见的固定密码**。
-5. 隧道内的 WebSocket 仍然校验验证码（常量时间比较，连续错误会锁定），作为第二层防护。
-6. 默认使用 Tailscale 运营的公共 tailcat DERP，也可以配置自建中继。公共中继不保证可用性和带宽；打洞成功后画面不再经过中继。
+1. **Transport.** WireGuard (Noise IK plus a preshared key) encrypts the connection end to end. The DERP relay sees ciphertext and public keys. The host listens only inside the tunnel.
+2. **Authentication.** Deriving the node public key and preshared key for the handshake requires both the device code and the verification code. DERP has no node-listing API.
+3. **Offline guessing.** Each guess costs one Argon2id computation with 64 MiB of memory. An attacker needs the device code to target a particular host. The default random verification code draws eight characters from an alphabet of 31, giving about 2^39.6 combinations. You can set a longer fixed password in Settings.
+4. **Online guessing.** An incorrect guess produces an unanswered handshake that the host never sees, so the host cannot rate-limit these attempts. Resistance depends on verification-code entropy and the cost of Argon2. **Avoid short, common fixed passwords.**
+5. The WebSocket inside the tunnel checks the verification code again using a constant-time comparison and locks out repeated failures.
+6. By default the app uses the public tailcat DERP relays operated by Tailscale. You can also configure your own. Public relay availability and bandwidth are best-effort. Once a direct connection succeeds, video travels directly between peers.
 
-## 平台支持
+## Platform support
 
-| | 画面传输 | 键鼠控制 |
+| Platform | Screen streaming | Keyboard and mouse input |
 | --- | --- | --- |
-| macOS | ✅ **H.264 硬件编码**（ScreenCaptureKit + VideoToolbox，需「屏幕录制」权限） | ✅ CGEvent（需「辅助功能」权限） |
-| Windows 10/11 (x64/ARM64) | ✅ **H.264 硬件编码**（DXGI 桌面复制 + D3D11 视频处理器 + Media Foundation） | ✅ SendInput |
-| Linux | JPEG 逐帧（X11） | ❌ 暂未实现（仅观看） |
-| Android | — 仅控制端（WebCodecs → MediaCodec 硬件解码） | — |
+| macOS | **Hardware H.264 encoding** with ScreenCaptureKit and VideoToolbox. Requires Screen Recording permission. | CGEvent. Requires Accessibility permission. |
+| Windows 10/11 (x64/ARM64) | **Hardware H.264 encoding** with DXGI Desktop Duplication, the D3D11 video processor, and Media Foundation. | SendInput |
+| Linux | JPEG frames on X11 | View only |
+| Android | Controller only, with hardware decoding through WebCodecs and MediaCodec | — |
 
-### macOS 硬件编码链路
+### macOS hardware encoding
 
-```
-ScreenCaptureKit ──NV12 IOSurface(显存, GPU 缩放)──▶ VideoToolbox H.264 (媒体引擎, 低延迟码控, 无 B 帧)
-   ──Annex-B──▶ WebSocket ──▶ 控制端硬件解码（VideoToolbox / Media Foundation，CLI 的浏览器界面用 WebCodecs）
-```
-
-- 像素全程不经过 CPU，零拷贝；画面静止时 ScreenCaptureKit 不产生新帧，带宽接近 0。
-- 控制端浏览器不支持 WebCodecs，或者被控端硬件编码启动失败（比如没有屏幕录制权限）时，自动回退到 JPEG。
-- 解码出错或积压时，浏览器会请求关键帧来重新同步；调整画质、帧率或分辨率会重建编码会话。
-- 码率由「画质」档位换算：1920×1080@15fps 的「标准」档约 2.5 Mbps。
-
-### Windows 硬件编码链路
-
-```
-DXGI Desktop Duplication (BGRA 纹理) ──CopyResource──▶ D3D11 Video Processor (GPU 上 BGRA→NV12 + 缩放, BT.709)
-   ──D3D11 纹理 (IMFDXGIDeviceManager, 零拷贝)──▶ Media Foundation 硬件 H.264 MFT (NVENC / Intel QSV / AMD AMF)
+```text
+ScreenCaptureKit → NV12 IOSurface (GPU memory and scaling) → VideoToolbox H.264
+                 → Annex-B over WebSocket → controller decoder
 ```
 
-- 纯 Go 通过 syscall 调用 COM，不需要 cgo 或 mingw，`GOOS=windows go build` 就能交叉编译。
-- COM 虚函数表下标由 [`internal/encoder/genvtbl`](internal/encoder/genvtbl) 从 mingw-w64 的 IDL 自动生成；struct 布局有编译期大小断言。
-- 按顺序尝试系统里的每个硬件编码器；全部失败（没有 GPU、远程桌面会话、Windows N 版缺少媒体功能包）时回退到 JPEG。
-- 码控用 CBR + 低延迟模式，不用 B 帧；收到关键帧请求时通过 `CODECAPI_AVEncVideoForceKeyFrame` 强制出 IDR，屏幕静止时会重新编码最后一帧。
-- 在 Windows 真机上验证：`go test ./internal/encoder/ -run TestMediaFoundation -v`
+- VideoToolbox uses the media engine with low-latency rate control and no B-frames. Native controllers decode with VideoToolbox or Media Foundation. The CLI browser controller uses WebCodecs.
+- The capture and encode path keeps pixels on the GPU without CPU copies. ScreenCaptureKit emits no new frames for a static screen, so bandwidth drops close to zero.
+- The stream falls back to JPEG if the browser lacks WebCodecs or hardware encoding fails to start on the host, for example when Screen Recording permission is missing.
+- On a decoder error or frame backlog, the browser requests a keyframe. Changing quality, frame rate, or resolution rebuilds the encoding session.
+- The quality preset determines the target bit rate. Standard quality at 1920×1080 and 15 fps targets about 2.5 Mbps.
 
-## 已知限制 / 后续方向
+### Windows hardware encoding
 
-- Windows 桌面复制的画面不含鼠标指针，目前控制端看到的是自己本地的指针；切换分辨率后会回退到 JPEG；旋转屏幕、HDR 屏幕还没处理。
-- 传输还是 WebSocket over TCP，丢包时会有队头阻塞；可以换成 WebRTC（Pion）走 UDP。
-- 原生客户端共享剪贴板支持纯文本（32 KiB）、图片（PNG 最大 32 MiB，最多 33,554,432 像素）和普通文件（单次最多 128 个，合计 1 GiB）。文件夹和符号链接不参与同步。文件全部接收后才能粘贴，接收端将文件暂存在应用缓存中。浏览器控制端暂不支持共享剪贴板。音频传输暂未支持。
-- 安卓版的画面要经过 Go → Java → WebView 消息桥（base64 文本），比原生视图多几毫秒延迟和一些 CPU 开销；高码率（如 4K、60 帧、高清）可能跟不上，会自动丢帧并重新同步。安卓版还没在真机或模拟器上跑过，只在 macOS 上用同一套界面和 WebView 验证过，也暂时只打包了 arm64。
-- Windows 控制端目前用 GDI 显示、CPU 做 NV12→BGRA，1080p 没问题，4K 高帧率会吃 CPU；可以换成 D3D11 交换链直接显示解码纹理。Windows 控制端也还拦不到 Win 键和 Alt+Tab（需要低级键盘钩子）。
-- NSGo v0.2.0 的 API 还不稳定，升级时可能要改界面代码。`go tool nsgo build` 在 macOS 上关闭了 cgo，本项目用到了 cgo，所以用 `scripts/build.sh` 打包。
-- Windows 上看不到 UAC 安全桌面或登录界面，要支持的话需要以 SYSTEM 服务运行。
-- 「无服务器」指的是没有自己的服务器、没有账号：NAT 打洞的协调和打洞失败后的中继，使用选定的公共或自建 DERP（tailcat 目前是实验项目，API 和公共区域可能变化）。
-- 双方都在对称 NAT 后时打不通，只能走中继，延迟和带宽受 DERP 限制。
+```text
+DXGI Desktop Duplication (BGRA texture) → CopyResource → D3D11 Video Processor (BGRA to NV12, GPU scaling, BT.709)
+    → D3D11 texture (IMFDXGIDeviceManager, zero copy) → Media Foundation hardware H.264 MFT (NVENC / Intel QSV / AMD AMF)
+```
+
+- Go calls COM through syscalls, so you can cross-compile with `GOOS=windows go build` without cgo or MinGW.
+- The project generates COM vtable indices from mingw-w64 IDL and checks struct sizes at compile time. [Vtable generator](internal/encoder/genvtbl)
+- The host tries each available hardware encoder in turn. It falls back to JPEG if all fail, which can happen without a GPU, in a Remote Desktop session, or on Windows N without the Media Feature Pack.
+- The encoder uses constant bit rate and low-latency mode with no B-frames. On a keyframe request, it forces an IDR frame with `CODECAPI_AVEncVideoForceKeyFrame`, re-encoding the last frame if the screen is static.
+- To verify on a Windows machine, run `go test ./internal/encoder/ -run TestMediaFoundation -v`.
+
+## Known limitations and future work
+
+- Windows Desktop Duplication omits the mouse pointer. The controller displays its local pointer. Changing the host's display resolution triggers a fallback to JPEG. Rotated displays and HDR are unsupported.
+- Video travels over WebSocket over TCP, so packet loss can delay subsequent frames through head-of-line blocking. A potential alternative is WebRTC over UDP using Pion.
+- Native clients share plain text up to 32 KiB, PNG images up to 32 MiB and 33,554,432 pixels, and up to 128 regular files totaling 1 GiB per transfer. Folders and symbolic links are skipped. Received files are staged in the app cache and can be pasted once the entire transfer finishes. The browser controller lacks shared clipboard support. Audio streaming is also unsupported.
+- Android passes frames from Go through Java to the WebView as base64 messages. The bridge adds a few milliseconds of latency and some CPU overhead. High bit rates, such as high-quality 4K at 60 fps, may cause the client to drop frames and resync. The Android interface and WebView have been tested on macOS only. Testing on an Android device or emulator is still pending. The APK currently targets arm64 only.
+- The Windows controller displays video with GDI and converts NV12 to BGRA on the CPU. This works at 1080p, but high-frame-rate 4K playback can be CPU-intensive. A D3D11 swap chain could display decoded textures directly. Capturing the Windows key and Alt+Tab would require a low-level keyboard hook.
+- The NSGo v0.2.0 API may require UI changes when upgrading. On macOS, `go tool nsgo build` disables cgo. This project requires cgo, so use `scripts/build.sh` to package it.
+- Windows hosts cannot show the UAC secure desktop or sign-in screen. Supporting these would require running as a SYSTEM service.
+- NAT traversal coordination and relay fallback use the selected public or self-hosted DERP server. tailcat is experimental, and its API and public relay regions may change.
+- When both peers are behind symmetric NATs, the connection uses DERP. The relay then determines the available bandwidth and latency.
