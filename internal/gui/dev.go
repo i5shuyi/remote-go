@@ -57,6 +57,14 @@ func (g *gui) devSession() {
 		return
 	}
 	addr, code, _ := strings.Cut(spec, "/")
+	if g.panel != nil {
+		g.async(func() error { return g.panel.Open(addr, code, addr) }, func(err error) {
+			if err != nil {
+				log.Print(err)
+			}
+		})
+		return
+	}
 	g.openSessionWith(func(cfg client.Config, h client.Handler) (*backend.Remote, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

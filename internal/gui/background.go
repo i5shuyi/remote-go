@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/png"
 
+	"github.com/nsgo-dev/nsgo"
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/desktop"
 )
@@ -56,6 +57,10 @@ func (g *gui) hideOnClose(cx *core.Scope) {
 }
 
 func (g *gui) showMain() {
+	if g.mainWin == nil {
+		nsgo.SetMainView(g.app, g.main)
+		return
+	}
 	if g.mainWin != nil && !g.mainWin.Closed() {
 		g.mainWin.Show()
 		g.mainWin.Focus()

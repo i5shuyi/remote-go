@@ -87,18 +87,38 @@ func New() *App { return &App{net: "starting"} }
 
 // Start loads the configuration and, in the background, finds the nearest
 // relay and starts listening.
-func (a *App) Start() {
+func (a *App) Start() { a.StartWithPassword("") }
+
+// StartWithPassword carries the current random code across an idle worker
+// replacement. A normal application launch still generates a fresh code.
+func (a *App) StartWithPassword(previous string) {
 	a.ctx, a.cancel = context.WithCancel(context.Background())
 	if err := a.loadConfig(); err != nil {
 		log.Printf("读取配置失败: %v", err)
 	}
 	a.password = a.cfg.FixedPassword
 	if a.password == "" {
+		a.password = previous
+	}
+	if a.password == "" {
 		a.password = randomPassword()
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelHoming = cancel
 	go a.bringUp(ctx)
+}
+
+// DrainIfIdle closes admission atomically with testing for active viewers.
+// Cancelling startup also prevents an in-flight listener from accepting one.
+func (a *App) DrainIfIdle() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.host != nil && !a.host.DrainIfIdle() {
+		return false
+	}
+	a.cancel()
+	a.hostGen++
+	return true
 }
 
 // Stop shuts everything down.
@@ -495,7 +515,7 @@ func (a *App) Connect(code, password string, cfg client.Config, h client.Handler
 	if err != nil {
 		return nil, err
 	}
-	a.remember(r.Target)
+	a.Remember(r.Target)
 	return r, nil
 }
 
@@ -534,7 +554,7 @@ func Dial(ctx context.Context, code, password, endpoint string, cfg client.Confi
 	return &Remote{Target: t, Session: s, Tunnel: tc}, nil
 }
 
-func (a *App) remember(t Target) {
+func (a *App) Remember(t Target) {
 	a.mu.Lock()
 	r := []Recent{{Code: t.Code, Name: t.Name, OS: t.OS, When: time.Now()}}
 	for _, x := range a.cfg.Recent {

@@ -14,12 +14,26 @@ import (
 	"github.com/nsgo-dev/nsgo/updater"
 
 	"github.com/i5shuyi/remote-go/internal/backend"
+	"github.com/i5shuyi/remote-go/internal/liveupdate"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
 )
 
+type settingsBackend interface {
+	SetName(string) error
+	SetFixedPassword(string) error
+	RefreshPassword() string
+	SetAllowControl(bool) error
+	SetRelay(int, string) error
+	SetDefaults(int, int)
+	ForgetRecent(string)
+	KickViewers()
+}
+
 type gui struct {
 	app     *core.Scope
-	be      *backend.App
+	be      settingsBackend
+	local   *backend.App
+	panel   *liveupdate.Panel
 	st      *core.Signal[backend.StateDTO]
 	page    *core.Signal[string]
 	toasts  *ui.Toaster

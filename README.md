@@ -83,7 +83,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.3.0/releases/remote-go-0.3.0-android-arm64.apk
+adb install -r bin/build-android/0.4.0/releases/remote-go-0.4.0-android-arm64.apk
 ```
 
 Building the APK requires Python 3.9+, JDK 17+, Android SDK Platform 34 or later, and Build Tools 36+ with d8. Use `ANDROID_HOME` to specify the SDK location.
@@ -104,6 +104,10 @@ Use Android to control a computer by entering the codes shown on its desktop. Re
 ## Updates and releases
 
 Starting with 0.3.0, desktop **Settings** (设置) and Android **Default settings** (默认设置) show the current version and offer **Check for updates** (检查更新). Release builds check daily by default. macOS updates through Sparkle. Windows updates the current user's installation through WinSparkle. Android verifies the APK and opens the system installer. Users on 0.2.x or earlier need to install a version with the updater manually once.
+
+Desktop builds starting with 0.4.0 can replace the main application during a remote session. The host keeps its tunnel and verification code, and each controller window keeps its video, keyboard input, and ongoing clipboard transfers. During an active session the new main interface starts in the menu bar or notification area. Choose **打开 Remote Go** to open it. New controller windows use the installed version. The host worker switches when its viewers and session windows have closed. Choosing **退出 Remote Go** from the main application's tray menu still ends all sessions.
+
+Schedule the first upgrade from 0.3.0 between sessions. On macOS, if prompted, grant the session helper Screen Recording and Accessibility permissions. Android updates still use the system installer.
 
 Each OS and architecture reads its own `appcast-<target>.xml` from the latest GitHub Release. The feed points to the full installer under the corresponding version tag. Each package has an Ed25519 signature.
 

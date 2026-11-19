@@ -7,6 +7,7 @@ require (
 	github.com/kbinani/screenshot v0.0.0-20250624051815-089614a94018
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e
 	github.com/nsgo-dev/nsgo v0.2.0
+	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55
 	github.com/tailscale/tailcat v0.7.0
 	go.yaml.in/yaml/v3 v3.0.6
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
@@ -45,7 +46,6 @@ require (
 	github.com/safchain/ethtool v0.7.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
 	github.com/tailscale/gliderssh v0.3.4-0.20261026144310-31f7cf365d3a // indirect
-	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect
 	github.com/tailscale/hujson v0.0.0-20260727124030-b80ff77dac4f // indirect
 	github.com/tailscale/peercred v0.0.0-20250107143737-35a0c7bd7edc // indirect
 	github.com/tailscale/web-client-prebuilt v0.0.0-20260917222731-e0ed2d0d0fea // indirect

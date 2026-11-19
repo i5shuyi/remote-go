@@ -26,6 +26,7 @@ import (
 
 	"github.com/i5shuyi/remote-go/internal/gui"
 	"github.com/i5shuyi/remote-go/internal/host"
+	"github.com/i5shuyi/remote-go/internal/liveupdate"
 	"github.com/i5shuyi/remote-go/internal/mobile"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
 	"github.com/i5shuyi/remote-go/internal/viewer"
@@ -62,11 +63,20 @@ func main() {
 		}
 		return
 	}
+	// A session window is an independent GUI process with normal OS exit signals.
+	if os.Args[1] == "session-window" {
+		if err := gui.SessionWindow(); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var err error
 	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
+	case "session-host":
+		err = liveupdate.Serve(ctx)
 	case "host":
 		err = runHost(ctx, args, false)
 	case "local":

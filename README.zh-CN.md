@@ -88,7 +88,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.3.0/releases/remote-go-0.3.0-android-arm64.apk
+adb install -r bin/build-android/0.4.0/releases/remote-go-0.4.0-android-arm64.apk
 ```
 
 构建 APK 需要 Python 3.9+、JDK 17+、Android SDK（platform 34 或更高）及带 d8 的 Build Tools 36+。可通过 `ANDROID_HOME` 指定 SDK 路径。
@@ -109,6 +109,10 @@ adb install -r bin/build-android/0.3.0/releases/remote-go-0.3.0-android-arm64.ap
 ## 在线更新与发布
 
 从 0.3.0 起，桌面「设置」和安卓首页「默认设置」会显示当前版本，并提供「检查更新」。正式安装包默认每天检查一次。发现新版后，macOS 通过 Sparkle 更新应用，Windows 通过 WinSparkle 更新当前用户安装的程序，Android 在验证 APK 后打开系统安装界面。0.2.x 及更早的用户需要手动安装一次含更新器的版本。
+
+从 0.4.0 起，桌面端可以在远控会话中更新主程序。被控端保留原隧道和验证码，控制端原窗口继续显示画面、接收键鼠输入，进行中的剪贴板传输也会继续。有会话时，新版主界面从菜单栏或通知区域启动，点击 **打开 Remote Go** 即可查看。新开的控制窗口使用新版，等被控连接和会话窗口全部关闭后，被控服务也会切到新版。从主程序托盘选择 **退出 Remote Go** 仍会结束所有会话。
+
+从 0.3.0 首次升级请安排在会话结束后。macOS 若提示授权，请给会话进程授予屏幕录制和辅助功能权限。Android 更新仍使用系统安装界面。
 
 每个系统和架构分别从 GitHub Releases 的 Latest 读取 `appcast-<目标>.xml`。清单链接到对应标签下的完整安装包，包使用 Ed25519 签名。发布者按以下步骤出包：
 

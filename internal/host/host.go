@@ -75,11 +75,13 @@ type Server struct {
 	cfg       Config
 	inj       input.Injector
 	clipboard clipshare.Board
+	capture   func(image.Rectangle) (*image.RGBA, error)
 
 	mu          sync.Mutex
 	fails       int
 	lockedUntil time.Time
 	active      atomic.Int32
+	draining    bool
 	nextID      int
 	sessions    map[int]*liveSession
 }
@@ -88,7 +90,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Code == "" {
 		cfg.Code = RandomCode()
 	}
-	s := &Server{cfg: cfg, sessions: map[int]*liveSession{}}
+	s := &Server{cfg: cfg, capture: captureRect, sessions: map[int]*liveSession{}}
 	if !cfg.ViewOnly {
 		inj, err := input.New()
 		if err != nil {
@@ -196,6 +198,18 @@ func (s *Server) checkCode(code string) error {
 	return errors.New("访问码错误")
 }
 
+// DrainIfIdle prevents an update from closing a socket that has just
+// authenticated but has not yet entered the session list.
+func (s *Server) DrainIfIdle() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.active.Load() != 0 {
+		return false
+	}
+	s.draining = true
+	return true
+}
+
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	login, node := s.who(r.Context(), r.RemoteAddr)
 	if err := s.checkCode(r.URL.Query().Get("code")); err != nil {
@@ -204,14 +218,21 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	s.mu.Lock()
+	if s.draining {
+		s.mu.Unlock()
+		http.Error(w, "host updating", http.StatusServiceUnavailable)
+		return
+	}
+	n := s.active.Add(1)
+	s.mu.Unlock()
+	defer s.active.Add(-1)
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	defer c.CloseNow()
 	c.SetReadLimit(clipshare.ChunkSize * 2)
-	n := s.active.Add(1)
-	defer s.active.Add(-1)
 	log.Printf("▶ %s (%s) 已连接，当前 %d 个控制端", node, login, n)
 	defer log.Printf("■ %s (%s) 已断开", node, login)
 
@@ -459,7 +480,7 @@ func (ss *session) streamJPEG(ctx context.Context) {
 	)
 	for ctx.Err() == nil {
 		start := time.Now()
-		img, err := captureRect(ss.bounds)
+		img, err := ss.s.capture(ss.bounds)
 		if err != nil {
 			if !errShown {
 				errShown = true

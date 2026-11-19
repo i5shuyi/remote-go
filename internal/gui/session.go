@@ -94,8 +94,12 @@ func (r *remote) RequestKeyframe() {
 // openSession dials the device and opens its window; done reports the
 // outcome on the UI thread.
 func (g *gui) openSession(code, password string, done func(error)) {
+	if g.panel != nil {
+		g.async(func() error { return g.panel.Open(code, password, "") }, done)
+		return
+	}
 	g.openSessionWith(func(cfg client.Config, h client.Handler) (*backend.Remote, error) {
-		return g.be.Connect(code, password, cfg, h)
+		return g.local.Connect(code, password, cfg, h)
 	}, done)
 }
 
@@ -182,7 +186,12 @@ func (g *gui) openSessionWith(dial func(client.Config, client.Handler) (*backend
 		title := fmt.Sprintf("%s（%s）- Remote Go", t.Name, groupCode(t.Code))
 		r.win = desktop.OpenWindow(g.app, desktop.WindowOptions{Title: title, Width: 1280, Height: 800,
 			Constraints: core.WindowConstraints{MinWidth: 640, MinHeight: 400}}, func(cx *core.Scope) core.Node {
-			return g.sessionView(cx, r)
+			view := g.sessionView(cx, r)
+			if g.local == nil && g.panel == nil {
+				// A standalone session has no home window to display clipboard errors.
+				return core.View{Class: "flex-1", Children: []core.Node{view, ui.Toasts{Toaster: g.toasts}}}
+			}
+			return view
 		})
 		r.win.OnClosing(g.app, func(*desktop.WindowClosing) {
 			r.clip.Set(false)
