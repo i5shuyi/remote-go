@@ -1,0 +1,101 @@
+name: Build and release
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and package
+    runs-on: macos-15
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Check release version
+        id: version
+        run: |
+          version=$(awk '$1 == "version:" {print $2}' nsgo.yaml)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag does not match nsgo.yaml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install packaging tools
+        run: |
+          command -v makensis || brew install nsis
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - run: go test ./...
+      - name: Build preview installers
+        if: github.event_name != 'push' || github.ref_type != 'tag'
+        run: |
+          mkdir dist
+          for platform in mac windows android; do
+            sh scripts/build.sh "$platform"
+          done
+          cp bin/build-mac/*/releases/*.dmg bin/build-windows/*/releases/*-setup.exe bin/build-android/*/releases/*.apk dist/
+      - name: Sign and verify release installers and feeds
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          NSGO_UPDATES_KEY: ${{ secrets.NSGO_UPDATES_KEY }}
+          ANDROID_SIGNING_PEM: ${{ secrets.ANDROID_SIGNING_PEM }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          : "${NSGO_UPDATES_KEY:?Missing NSGO_UPDATES_KEY}" "${ANDROID_SIGNING_PEM:?Missing ANDROID_SIGNING_PEM}"
+          umask 077
+          mkdir -p .nsgo/android
+          trap 'rm -f .nsgo/android/debug.pem' EXIT
+          printf '%s\n' "$ANDROID_SIGNING_PEM" > .nsgo/android/debug.pem
+          unset ANDROID_SIGNING_PEM
+          sh scripts/build.sh release
+          mkdir dist
+          cd "bin/signed/$VERSION/releases"
+          shasum -a 256 -c ./*.sha256
+          cp ./*.xml ./*.dmg ./*.exe ./*.apk ./*.sha256 "$GITHUB_WORKSPACE/dist/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ steps.version.outputs.version }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish signed release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installers-${{ needs.build.outputs.version }}
+          path: dist/
+      - name: Publish and verify Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/publish.py dist "$GITHUB_REF_NAME"

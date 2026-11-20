@@ -111,9 +111,11 @@ Schedule the first upgrade from 0.3.0 between sessions. On macOS, if prompted, g
 
 Each OS and architecture reads its own `appcast-<target>.xml` from the latest GitHub Release. The feed points to the full installer under the corresponding version tag. Each package has an Ed25519 signature.
 
-1. Bump `version` in `nsgo.yaml` and use `v<version>` for the release tag. The build machine needs macOS, Go, the Xcode command line tools, Python 3.9+, NSIS, and the Android build tools listed above.
-2. Run `sh scripts/build.sh release`. The script reads the release signing key from `NSGO_UPDATES_KEY` or `~/.config/remote-go/updates.key`. The application embeds the corresponding public key. Android releases must also use the same APK signing identity as earlier builds. This project previously used `.nsgo/android/debug.pem`. Back up both private keys separately.
-3. Upload the four XML feeds, four installers, and their checksum files from `bin/signed/<version>/releases/` to the same tagged GitHub Release in `i5shuyi/remote-go`. Verify the assets are complete, then publish the release as **Latest**. Draft releases do not trigger client updates. The build script generates and verifies files locally.
+GitHub Actions runs the Go tests and builds the four preview installers for pull requests, pushes to `main`, and manual runs. Download the seven-day test artifact from the **Build and release** workflow. Preview APKs use a temporary signing identity.
+
+To release, commit the new `version` in `nsgo.yaml` and push the matching stable tag, for example `v0.5.0`. The tag workflow uses the `NSGO_UPDATES_KEY` and `ANDROID_SIGNING_PEM` Actions secrets for the existing update and APK signing identities. It verifies the signed files, checks all 16 draft assets, publishes the release as **Latest**, then downloads the public feeds and installers to verify them. Rerun a failed release job to resume its draft or recheck an already published version.
+
+For a local signed build, run `sh scripts/build.sh release` on macOS with Go, the Xcode command line tools, NSIS and the Android tools listed above. The script reads the update key from `NSGO_UPDATES_KEY` or `~/.config/remote-go/updates.key`, and the APK signing identity from `.nsgo/android/debug.pem`. Keep independent backups of both private keys.
 
 ## Command-line usage
 

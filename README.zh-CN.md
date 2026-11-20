@@ -114,11 +114,13 @@ adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.ap
 
 从 0.3.0 首次升级请安排在会话结束后。macOS 若提示授权，请给会话进程授予屏幕录制和辅助功能权限。Android 更新仍使用系统安装界面。
 
-每个系统和架构分别从 GitHub Releases 的 Latest 读取 `appcast-<目标>.xml`。清单链接到对应标签下的完整安装包，包使用 Ed25519 签名。发布者按以下步骤出包：
+每个系统和架构分别从 GitHub Releases 的 Latest 读取 `appcast-<目标>.xml`。清单链接到对应标签下的完整安装包，包使用 Ed25519 签名。
 
-1. 在 `nsgo.yaml` 提升 `version`，标签使用 `v<版本>`。构建机需要 macOS、Go、Xcode 命令行工具、Python 3.9+、NSIS 和上文的 Android 构建工具。
-2. 运行 `sh scripts/build.sh release`。构建脚本从环境变量 `NSGO_UPDATES_KEY` 或本机的 `~/.config/remote-go/updates.key` 读取发布私钥，安装包内置对应公钥。Android 发布还需要沿用原来的 APK 签名身份，本项目此前使用的签名文件是 `.nsgo/android/debug.pem`。这两份私钥均需独立备份。
-3. 将 `bin/signed/<版本>/releases/` 下的四份 XML、四个安装包及其校验文件一起上传到 `i5shuyi/remote-go` 同一标签的 GitHub Release，检查附件齐全后发布为公开的 Latest。草稿阶段不会触发已安装客户端更新。构建脚本本身只生成和验证本地文件。
+GitHub Actions 会在 PR、推送到 `main` 和手动触发时运行 Go 测试，并构建四个测试安装包。可在 **Build and release** 工作流的运行记录中下载，保留七天。测试 APK 使用临时签名。
+
+发布时先提交 `nsgo.yaml` 的新版本号，再推送对应正式标签，例如 `v0.5.0`。标签工作流通过 Actions Secrets 中的 `NSGO_UPDATES_KEY` 和 `ANDROID_SIGNING_PEM` 沿用现有更新签名和 APK 签名身份。工作流验证签名、核对草稿中的 16 个附件后发布为 **Latest**，并从公开地址重新下载清单和安装包进行校验。发布任务失败后可重跑，以继续上传草稿或重新校验已发布版本。
+
+也可在安装了 Go、Xcode 命令行工具、NSIS 和上述 Android 工具的 macOS 上运行 `sh scripts/build.sh release`。本地构建读取 `NSGO_UPDATES_KEY` 或 `~/.config/remote-go/updates.key` 的更新私钥，以及 `.nsgo/android/debug.pem` 的 APK 签名身份。两份私钥均应独立备份。
 
 ## 命令行用法
 
