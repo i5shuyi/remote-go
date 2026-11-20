@@ -88,7 +88,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.4.0/releases/remote-go-0.4.0-android-arm64.apk
+adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.apk
 ```
 
 构建 APK 需要 Python 3.9+、JDK 17+、Android SDK（platform 34 或更高）及带 d8 的 Build Tools 36+。可通过 `ANDROID_HOME` 指定 SDK 路径。

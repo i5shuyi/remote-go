@@ -83,7 +83,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.4.0/releases/remote-go-0.4.0-android-arm64.apk
+adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.apk
 ```
 
 Building the APK requires Python 3.9+, JDK 17+, Android SDK Platform 34 or later, and Build Tools 36+ with d8. Use `ANDROID_HOME` to specify the SDK location.
