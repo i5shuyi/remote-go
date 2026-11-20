@@ -35,6 +35,22 @@ func SessionWindow() error {
 		g.openSessionWith(func(cfg client.Config, h client.Handler) (*backend.Remote, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 			defer cancel()
+			if w.Member != "" {
+				p := liveupdate.Proxy{Addr: w.MemberAddr, Token: w.MemberToken, Name: w.MemberName}
+				w.MemberAddr = "" // the first proxy is single-use; reconnects ask again
+				if p.Addr == "" {
+					var err error
+					if p, err = liveupdate.RequestMemberProxy(w.Member); err != nil {
+						return nil, err
+					}
+				}
+				r, err := backend.DialProxy(ctx, p.Addr, p.Token, cfg, h)
+				if err == nil {
+					r.Target.Member, r.Target.Name = w.Member, p.Name
+					target = r.Target
+				}
+				return r, err
+			}
 			if w.Local != "" {
 				var d net.Dialer
 				s, err := client.Dial(ctx, d.DialContext, w.Local, w.Password, true, cfg, h)

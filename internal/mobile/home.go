@@ -45,6 +45,7 @@ func osName(os string) string {
 }
 
 func (a *app) home(cx *core.Scope) core.Node {
+	a.syncMembers() // the home screen appears at launch and after each session
 	code := core.NewSignal(cx, "")
 	pw := core.NewSignal(cx, "")
 	busy := core.NewSignal(cx, false)
@@ -119,6 +120,8 @@ func (a *app) home(cx *core.Scope) core.Node {
 					})
 				}},
 			}},
+
+			a.devicesCard(cx, code.GetUntracked, pw.GetUntracked),
 
 			// Recent devices
 			core.Show{When: func() bool { return len(a.recent.Get()) > 0 }, Then: func(cx *core.Scope) core.Node {

@@ -25,6 +25,7 @@ import (
 	"github.com/i5shuyi/remote-go/internal/client"
 	"github.com/i5shuyi/remote-go/internal/clipshare"
 	"github.com/i5shuyi/remote-go/internal/controlball"
+	"github.com/i5shuyi/remote-go/internal/members"
 	"github.com/i5shuyi/remote-go/internal/sessionclip"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
 )
@@ -43,6 +44,7 @@ const playerBase = "https://player.remote-go.invalid/"
 type remote struct {
 	id       string
 	code, pw string // for reconnecting
+	member   string // "my devices" member ID instead of codes
 	t        backend.Target
 
 	mu  sync.Mutex
@@ -75,12 +77,15 @@ func (r *remote) sess() *client.Session {
 
 // open connects to the host and shows its screen; done runs on the UI
 // thread with the outcome.
-func (a *app) open(code, pw string, done func(error)) {
+func (a *app) open(code, pw string, done func(error)) { a.openRemote(code, pw, "", done) }
+
+// openRemote connects with codes, or to a member when member is set.
+func (a *app) openRemote(code, pw, member string, done func(error)) {
 	b := make([]byte, 8)
 	rand.Read(b)
 	st := a.settings.GetUntracked()
 	cx := a.cx
-	r := &remote{id: hex.EncodeToString(b), code: code, pw: pw, web: &core.Ref{},
+	r := &remote{id: hex.EncodeToString(b), code: code, pw: pw, member: member, web: &core.Ref{},
 		stats: core.NewSignal(cx, client.Stats{}), path: core.NewSignal(cx, ""), control: core.NewSignal(cx, false),
 		cfg:  core.NewSignal(cx, client.Config{Quality: st.Quality, FPS: st.FPS, Width: 1920}),
 		mode: core.NewSignal(cx, st.Mode), ended: core.NewSignal(cx, ""), retry: core.NewSignal(cx, false),
@@ -123,9 +128,21 @@ func (a *app) open(code, pw string, done func(error)) {
 	cfg := r.cfg.GetUntracked()
 	logf := tunnel.Logf(a.verbose)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
-		defer cancel()
-		rem, err := backend.Dial(ctx, code, pw, st.RelayAddress, cfg, h, logf)
+		var rem *backend.Remote
+		var err error
+		if member != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), members.ApproveTimeout+30*time.Second)
+			defer cancel()
+			if n := a.node; n == nil {
+				err = errors.New("我的设备不可用")
+			} else if rem, err = backend.ConnectMember(ctx, n, member, cfg, h, logf); err == nil {
+				rem.Target.Name = a.memberName(member)
+			}
+		} else {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+			rem, err = backend.Dial(ctx, code, pw, st.RelayAddress, cfg, h, logf)
+		}
 		cx.Post(func() {
 			if err != nil {
 				if errors.Is(err, client.ErrBadCode) {
@@ -485,7 +502,7 @@ func (a *app) disconnectDialog(cx *core.Scope, r *remote) core.Node {
 func (a *app) endedView(cx *core.Scope, r *remote) core.Node {
 	reconnect := func() {
 		r.retry.Set(true)
-		a.open(r.code, r.pw, func(err error) {
+		a.openRemote(r.code, r.pw, r.member, func(err error) {
 			r.retry.Set(false)
 			if err != nil {
 				r.ended.Set("重新连接失败：" + err.Error())

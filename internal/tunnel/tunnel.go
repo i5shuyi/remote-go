@@ -244,6 +244,16 @@ func (c *Conn) DialContext(ctx context.Context, network, addr string) (net.Conn,
 	return c.c.DialTCPPort(ctx, Port)
 }
 
+// DialPort dials another TCP port inside the tunnel, such as PairPort.
+func (c *Conn) DialPort(ctx context.Context, port uint16) (net.Conn, error) {
+	return c.c.DialTCPPort(ctx, port)
+}
+
+// ListenPort listens on another TCP port of the same tailcat server.
+func (l *Listener) ListenPort(ctx context.Context, port uint16) (net.Listener, error) {
+	return l.srv.Listen(ctx, "tcp", fmt.Sprintf(":%d", port))
+}
+
 // Path reports how packets travel: "direct" (P2P UDP) or "relay" (DERP).
 func (c *Conn) Path(ctx context.Context) string {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)

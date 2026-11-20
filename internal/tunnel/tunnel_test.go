@@ -80,3 +80,27 @@ func TestTailcat(t *testing.T) {
 		t.Fatalf("wrong password: %v", err)
 	}
 }
+
+func TestMemberRelay(t *testing.T) {
+	for r, want := range map[MemberRelay]string{
+		{Region: 304}:                      `{"region":304}`,
+		{Address: "derp.example.com:8443"}: `{"address":"derp.example.com:8443"}`,
+		{Address: "[2001:db8::1]:443"}:     `{"address":"[2001:db8::1]:443"}`,
+	} {
+		if got, err := r.Canonical(); err != nil || string(got) != want {
+			t.Errorf("%+v → %s %v", r, got, err)
+		}
+	}
+	for _, r := range []MemberRelay{{}, {Region: 900}, {Region: 304, Address: "a.b:443"}, {Address: "DERP.example.com"}} {
+		if _, err := r.Canonical(); err == nil {
+			t.Errorf("accepted %+v", r)
+		}
+	}
+	e := MemberEndpoint{GroupKey: make([]byte, 32), GroupID: make([]byte, 32), KeyVersion: make([]byte, 32), MemberID: make([]byte, 32), Relay: MemberRelay{Region: 301}}
+	a1, _ := e.Addr()
+	e.Relay = MemberRelay{Region: 302}
+	a2, _ := e.Addr()
+	if a1 == a2 || a1 == "" {
+		t.Fatal("relay must change the member address")
+	}
+}

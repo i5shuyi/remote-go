@@ -79,6 +79,11 @@ type App struct {
 	hostLn  *tunnel.Listener
 	hostErr string
 	hostGen int // bumps on every start/stop, so a slow start can tell it is stale
+
+	mem   memberSide
+	memMu sync.Mutex // serializes member listener changes
+	// UIAttached, if set, reports whether a window can show local prompts.
+	UIAttached UIAttachedFunc
 }
 
 func New() *App { return &App{net: "starting"} }
@@ -105,6 +110,7 @@ func (a *App) StartWithPassword(previous string) {
 	}
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.cancelHoming = cancel
+	go a.openMembers(a.ctx)
 	go a.bringUp(ctx)
 }
 
@@ -121,12 +127,14 @@ func (a *App) DrainIfIdle() bool {
 	return true
 }
 
-// Stop shuts everything down.
+// Stop shuts everything down and releases members.json for the next
+// worker.
 func (a *App) Stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
-	a.stopHost()
+	a.stopAll()
+	a.closeMembers()
 }
 
 func (a *App) loadConfig() error {
@@ -280,7 +288,13 @@ func (a *App) startHost() {
 	code, pw, name, endpoint := a.cfg.DeviceCode, a.password, a.cfg.Name, a.cfg.RelayAddress
 	a.mu.Unlock()
 
-	h, err := host.New(host.Config{Name: name, Code: pw, OnChange: a.emit})
+	a.mu.Lock()
+	h := a.host
+	a.mu.Unlock()
+	var err error
+	if h == nil {
+		h, err = host.New(host.Config{Name: name, Code: pw, OnChange: a.emit, PairToken: a.pairToken})
+	}
 	var ln *tunnel.Listener
 	if err == nil {
 		ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
@@ -301,23 +315,49 @@ func (a *App) startHost() {
 		a.emit()
 		return
 	}
+	h.SetCode(pw)
+	h.SetName(name)
 	a.host, a.hostLn, a.hostErr = h, ln, ""
+	a.setBarrierLocked()
 	a.mu.Unlock()
 	go h.Serve(ln)
+	a.startPairServer(ln)
+	go a.reconcileMembers()
 	a.emit()
 }
 
+// stopHost closes the device-code listener and its sessions. The member
+// listeners and their sessions are independent of the codes.
 func (a *App) stopHost() {
+	a.stopPairServer()
 	a.mu.Lock()
 	a.hostGen++
 	h, ln := a.host, a.hostLn
-	a.host, a.hostLn = nil, nil
+	a.hostLn = nil
 	a.mu.Unlock()
 	if h != nil {
-		h.Kick()
+		h.KickCodeSessions()
 	}
 	if ln != nil {
 		ln.Close()
+	}
+	a.emit()
+}
+
+// stopAll turns off both kinds of inbound access, ends every session and
+// voids requests waiting for approval.
+func (a *App) stopAll() {
+	a.stopHost()
+	a.stopMemberListeners()
+	if n := a.memberNode(); n != nil {
+		n.DisconnectAll()
+	}
+	a.mu.Lock()
+	h := a.host
+	a.host = nil
+	a.mu.Unlock()
+	if h != nil {
+		h.Kick()
 	}
 	a.emit()
 }
@@ -352,6 +392,7 @@ type StateDTO struct {
 	RelayRegion   int                `json:"relayRegion"`
 	RelayAddress  string             `json:"relayAddress"`
 	Viewers       []host.SessionInfo `json:"viewers"`
+	Members       MembersDTO         `json:"members"`
 	Quality       int                `json:"quality"`
 	FPS           int                `json:"fps"`
 	Recent        []Recent           `json:"recent"`
@@ -377,9 +418,10 @@ func RelayName(r int) string {
 
 // State returns everything the home screen shows.
 func (a *App) State() StateDTO {
+	m := a.membersDTO()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := StateDTO{
+	s := StateDTO{Members: m,
 		Name: a.cfg.Name, OS: runtime.GOOS,
 		Password: a.password, FixedPassword: a.cfg.FixedPassword != "",
 		AllowControl: a.cfg.AllowControl, HostError: a.hostErr, Hosting: a.hostLn != nil,
@@ -438,7 +480,7 @@ func (a *App) SetAllowControl(on bool) error {
 	if on {
 		a.startHost()
 	} else {
-		a.stopHost()
+		a.stopAll()
 	}
 	return err
 }
@@ -456,11 +498,15 @@ func (a *App) SetName(name string) error {
 	return err
 }
 
-// KickViewers disconnects everyone controlling this device.
+// KickViewers disconnects everyone controlling this device, including
+// "my devices" sessions and requests waiting for approval.
 func (a *App) KickViewers() {
 	a.mu.Lock()
 	h := a.host
 	a.mu.Unlock()
+	if n := a.memberNode(); n != nil {
+		n.DisconnectAll()
+	}
 	if h != nil {
 		h.Kick()
 	}
@@ -470,6 +516,7 @@ func (a *App) KickViewers() {
 
 // Target is the device a session is connected to.
 type Target struct {
+	Member  string // member ID when connected through "my devices"
 	Code    string
 	Name    string
 	OS      string
@@ -555,6 +602,9 @@ func Dial(ctx context.Context, code, password, endpoint string, cfg client.Confi
 }
 
 func (a *App) Remember(t Target) {
+	if t.Code == "" { // "my devices" sessions are listed there instead
+		return
+	}
 	a.mu.Lock()
 	r := []Recent{{Code: t.Code, Name: t.Name, OS: t.OS, When: time.Now()}}
 	for _, x := range a.cfg.Recent {

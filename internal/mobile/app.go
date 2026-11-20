@@ -17,6 +17,7 @@ import (
 	"github.com/nsgo-dev/nsgo/ui"
 
 	"github.com/i5shuyi/remote-go/internal/backend"
+	"github.com/i5shuyi/remote-go/internal/members"
 )
 
 // Recent is a device the phone connected to.
@@ -42,6 +43,11 @@ type app struct {
 	settings *core.Signal[Settings]
 	session  *core.Signal[*remote] // the open session, nil on the home page
 	verbose  bool
+
+	node    *members.Node // "my devices": this phone is a controller only
+	mem     *core.Signal[members.Snapshot]
+	prompt  *core.Signal[*pairPrompt]
+	pairing *core.Signal[string]
 }
 
 // Run opens the phone app and returns when it ends. On a desktop it opens
@@ -52,6 +58,7 @@ func Run() error {
 		a.recent = core.NewSignalFunc(cx, a.load(), func(x, y []Recent) bool { return false })
 		a.settings = core.NewSignal(cx, a.loadSettings())
 		a.session = core.NewSignal[*remote](cx, nil)
+		a.openMembers()
 		nsgo.SetMainView(cx, a.main)
 		a.devConnect()
 	}, nsgo.WindowSize(400, 820))
@@ -116,6 +123,9 @@ func (a *app) saveSettings(st Settings) error {
 }
 
 func (a *app) remember(t backend.Target) {
+	if t.Code == "" { // "my devices" sessions are listed there instead
+		return
+	}
 	r := []Recent{{Code: t.Code, Name: t.Name, OS: t.OS, When: time.Now()}}
 	for _, x := range a.recent.GetUntracked() {
 		if x.Code != t.Code && len(r) < 12 {
