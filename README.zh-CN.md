@@ -105,7 +105,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.5.0/releases/remote-go-0.5.0-android-arm64.apk
+adb install -r bin/build-android/0.5.1/releases/remote-go-0.5.1-android-arm64.apk
 ```
 
 构建 APK 需要 Python 3.9+、JDK 17+、Android SDK（platform 34 或更高）及带 d8 的 Build Tools 36+。可通过 `ANDROID_HOME` 指定 SDK 路径。
@@ -135,7 +135,7 @@ adb install -r bin/build-android/0.5.0/releases/remote-go-0.5.0-android-arm64.ap
 
 GitHub Actions 会在 PR、推送到 `main` 和手动触发时运行 Go 测试，并构建八个测试安装包。可在 **Build and release** 工作流的运行记录中下载，保留七天。测试 APK 使用临时签名。
 
-发布时先提交 `nsgo.yaml` 的新版本号，再推送对应正式标签，例如 `v0.5.0`。标签工作流通过 Actions Secrets 中的 `NSGO_UPDATES_KEY` 和 `ANDROID_SIGNING_PEM` 沿用现有更新签名和 APK 签名身份。工作流验证签名、核对草稿中的 28 个附件后发布为 **Latest**，并从公开地址重新下载清单和安装包进行校验。发布任务失败后可重跑，以继续上传草稿或重新校验已发布版本。
+发布时先提交 `nsgo.yaml` 的新版本号，再推送对应正式标签，例如 `v0.5.1`。标签工作流通过 Actions Secrets 中的 `NSGO_UPDATES_KEY` 和 `ANDROID_SIGNING_PEM` 沿用现有更新签名和 APK 签名身份。工作流验证签名、核对草稿中的 28 个附件后发布为 **Latest**，并从公开地址重新下载清单和安装包进行校验。发布任务失败后可重跑，以继续上传草稿或重新校验已发布版本。
 
 也可在安装了 Go、Xcode 命令行工具、NSIS 和上述 Android 工具的 macOS 上运行 `sh scripts/build.sh release`。本地构建读取 `NSGO_UPDATES_KEY` 或 `~/.config/remote-go/updates.key` 的更新私钥，以及 `.nsgo/android/debug.pem` 的 APK 签名身份。两份私钥均应独立备份。
 

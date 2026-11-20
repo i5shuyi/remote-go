@@ -114,14 +114,15 @@ func (g *gui) main(cx *core.Scope) core.Node {
 		desktop.SetTitleBar(cx, desktop.TitleBarHidden, 36)
 	}
 	g.hideOnClose(cx)
+	device := core.NewSignal(cx, "")
 	return core.View{Class: "flex-1 flex-row bg-background", Children: []core.Node{
-		g.sidebar(cx),
+		g.sidebar(cx, device),
 		core.View{Class: "flex-1 flex-col", Children: []core.Node{
 			g.banners(cx),
 			core.Scroll{Style: core.Style{FlexGrow: 1, FlexShrink: 1}, Children: []core.Node{
 				core.View{Class: "px-8 pb-8 gap-5", Children: []core.Node{
 					core.Show{When: func() bool { return g.page.Get() == "home" }, Then: g.home},
-					core.Show{When: func() bool { return g.page.Get() == "devices" }, Then: g.devices},
+					core.Show{When: func() bool { return g.page.Get() == "devices" }, Then: func(cx *core.Scope) core.Node { return g.devices(cx, device) }},
 					core.Show{When: func() bool { return g.page.Get() == "settings" }, Then: g.settings},
 				}},
 			}},
@@ -132,13 +133,13 @@ func (g *gui) main(cx *core.Scope) core.Node {
 	}}
 }
 
-func (g *gui) sidebar(cx *core.Scope) core.Node {
+func (g *gui) sidebar(cx *core.Scope, device *core.Signal[string]) core.Node {
 	nav := func(id, label string, svg func() *core.SVG) core.Node {
 		return base.Button{
 			Class: "flex-row items-center gap-3 px-3 h-[40px] rounded-md hover:bg-muted",
 			StyleFunc: func() core.Style {
 				style := core.Style{FocusVisible: ui.FocusRing(cx, -2)}
-				if g.page.Get() == id {
+				if g.page.Get() == id && !(id == "devices" && g.mem().InGroup) {
 					style.Background = core.RGBA(0x35aeca, 0.18)
 				}
 				return style
@@ -148,7 +149,13 @@ func (g *gui) sidebar(cx *core.Scope) core.Node {
 			Children: []core.Node{icon(svg, "w-[18px] h-[18px]"), text("text-sm font-medium", label)},
 		}
 	}
-	return core.View{Class: "w-[168px] bg-[#f4f7f8] dark:bg-card border-r border-border p-3 gap-1", Desktop: mainWindowDrag(), Children: []core.Node{
+	return core.View{Class: "bg-[#f4f7f8] dark:bg-card border-r border-border p-3 gap-1", StyleFunc: func() core.Style {
+		width := core.Points(168)
+		if g.page.Get() == "devices" {
+			width = 224
+		}
+		return core.Style{Width: core.Pt(width)}
+	}, Desktop: mainWindowDrag(), Children: []core.Node{
 		core.View{Class: "flex-row items-center gap-1 px-1 pt-3 pb-6", StyleFunc: func() core.Style {
 			return core.Style{Margin: core.Edges{Top: desktop.TitleBar(cx).Top}}
 		}, Children: []core.Node{
@@ -157,6 +164,7 @@ func (g *gui) sidebar(cx *core.Scope) core.Node {
 		}},
 		nav("home", "远程控制", lucide.Monitor),
 		nav("devices", "我的设备", lucide.MonitorSmartphone),
+		core.Show{When: func() bool { return g.page.Get() == "devices" && g.mem().InGroup }, Then: func(cx *core.Scope) core.Node { return g.deviceNavigation(cx, device) }},
 		core.View{Class: "flex-1"},
 		nav("settings", "设置", lucide.Settings),
 		core.View{Class: "flex-row items-center gap-2 px-2 py-3 border-t border-border", Children: []core.Node{

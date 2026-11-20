@@ -1,9 +1,12 @@
 """Build Remote Go with its native screen/clipboard support and signed update feeds."""
 import argparse
+import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import zipfile
@@ -74,8 +77,10 @@ def verify_output(directory, target, version, signed, dex):
             if apk.read("classes.dex") != dex.read_bytes():
                 raise SystemExit("Missing Android clipboard extension")
         certs = subprocess.check_output([sdk_tool("build-tools/*/apksigner"), "verify",
-                                         "--print-certs", package], text=True)
-        if signed and f"Signer #1 certificate SHA-256 digest: {APK_CERT}" not in certs.splitlines():
+                                         "--print-certs-pem", package], text=True)
+        certificates = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", certs, re.S)
+        fingerprints = [hashlib.sha256(ssl.PEM_cert_to_DER_cert(cert)).hexdigest() for cert in certificates]
+        if signed and fingerprints != [APK_CERT]:
             raise SystemExit("Android signing certificate differs from previous releases")
 
 

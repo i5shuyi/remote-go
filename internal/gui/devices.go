@@ -73,31 +73,43 @@ func platformName(d backend.DeviceDTO) string {
 	return osName(d.Platform)
 }
 
-func (g *gui) devices(cx *core.Scope) core.Node {
+func (g *gui) devices(cx *core.Scope, selected *core.Signal[string]) core.Node {
 	pairOpen := core.NewSignal(cx, false)
 	removing := core.NewSignal(cx, backend.DeviceDTO{})
-	connecting := core.NewSignal(cx, "") // the device being dialed
-	policy := func(change func(*members.Policy)) {
-		m := g.mem()
-		p := members.Policy{AllowInbound: m.AllowInbound, Unattended: m.Unattended, ViewOnly: m.ViewOnly}
-		change(&p)
-		g.run(func() error { return g.be.SetMemberPolicy(p) }, "")
-	}
-	row := func(title string, detail func() string, control core.Node) core.Node {
-		return core.View{Class: "flex-row items-center gap-4 pt-3 border-t border-border", Children: []core.Node{
-			core.View{Class: "flex-1 shrink gap-1", Children: []core.Node{
-				text("text-sm font-semibold", title), textf("text-xs text-muted-foreground", detail),
-			}},
-			control,
-		}}
+	detailID := core.NewSignal(cx, "")
+	manage := core.NewSignal(cx, false)
+	connecting := core.NewSignal(cx, "")
+	current := func() backend.DeviceDTO { return g.selectedMember(selected.Get()) }
+	overview := func() bool { return current().ID == "" }
+	openManagement := func() { selected.Set(allDevices); manage.Set(true) }
+	connect := func() {
+		d := current()
+		if !canEnterDesktop(d) || g.mem().Conflict || connecting.Get() != "" {
+			return
+		}
+		connecting.Set(d.ID)
+		g.openMember(d.ID, func() { connecting.Set("") })
 	}
 	notReady := func() bool { return !g.mem().Ready }
-	inbound := func() bool { return g.mem().AllowInbound }
 	return core.View{Class: "gap-4 max-w-[960px]", Children: []core.Node{
-		pageHeader("我的设备",
-			ui.IconButton{Icon: lucide.RefreshCw, Label: "立即同步", Disabled: notReady, OnPress: func() { go g.be.SyncMembers() }},
-			ui.Button{Text: "添加设备", Icon: lucide.Plus, Color: assets.Accent, Disabled: notReady, OnPress: func() { pairOpen.Set(true) }},
-		),
+		core.Show{When: overview, Then: func(*core.Scope) core.Node {
+			return pageHeader("我的设备", ui.IconButton{Icon: lucide.RefreshCw, Label: "立即同步", Disabled: notReady, OnPress: func() { go g.be.SyncMembers() }},
+				core.Show{When: func() bool { return g.mem().InGroup || g.mem().Conflict }, Then: func(*core.Scope) core.Node {
+					return ui.Button{Text: "添加设备", Icon: lucide.Plus, Variant: ui.ButtonOutline, Disabled: notReady, OnPress: func() { pairOpen.Set(true) }}
+				}},
+			)
+		}, Else: func(*core.Scope) core.Node {
+			return core.View{Class: "flex-row items-center gap-3 pt-7 pb-4 border-b border-border", Desktop: mainWindowDrag(), Children: []core.Node{
+				core.View{Class: "rounded-full bg-muted px-2 py-1", Children: []core.Node{textf("text-xs font-medium", func() string {
+					if current().Self {
+						return "本机"
+					}
+					return "已配对"
+				})}},
+				core.Text{Class: "flex-1 shrink text-xl font-semibold", MaxLines: 1, ContentFunc: func() string { return current().Name }},
+				ui.IconButton{Icon: lucide.Plus, Label: "添加设备", OnPress: func() { pairOpen.Set(true) }},
+			}}
+		}},
 		core.Show{When: notReady, Then: func(cx *core.Scope) core.Node {
 			return section(textf("text-sm text-muted-foreground", func() string {
 				if e := g.mem().Error; e != "" {
@@ -129,96 +141,79 @@ func (g *gui) devices(cx *core.Scope) core.Node {
 			}}
 		}},
 		core.Show{When: func() bool { m := g.mem(); return m.Ready && !m.InGroup && !m.Conflict }, Then: func(cx *core.Scope) core.Node {
-			return section(
-				text("text-base font-semibold", "尚未配对设备"),
-				text("text-sm text-muted-foreground", "点击「添加设备」，输入另一台设备的代码和验证码。在两端确认配对码后，即可从这里直接连接。"),
-			)
-		}},
-		core.Show{When: func() bool { return g.mem().InGroup }, Then: func(cx *core.Scope) core.Node {
-			return core.View{Class: "gap-4", Children: []core.Node{
-				section(
-					core.View{Class: "flex-row items-center gap-2", Children: []core.Node{
-						text("flex-1 text-lg font-semibold", "设备"),
-						textf("text-xs text-muted-foreground", func() string { return "组指纹 " + g.mem().Group }),
-					}},
-					core.Each(func() []backend.DeviceDTO { return g.mem().Devices }, func(d backend.DeviceDTO) string { return d.ID },
-						func(cx *core.Scope, d func() backend.DeviceDTO, _ func() int) core.Node {
-							return core.View{Class: "flex-row items-center gap-3 pt-3 border-t border-border", Children: []core.Node{
-								core.Icon{SVG: func() *core.SVG {
-									if d().Platform == "android" {
-										return lucide.Smartphone()
-									}
-									return lucide.Laptop()
-								}(), Class: "w-[20px] h-[20px] text-muted-foreground"},
-								core.View{Class: "flex-1 shrink gap-1", Children: []core.Node{
-									textf("text-sm font-semibold", func() string { return d().Name }),
-									textf("text-xs text-muted-foreground", func() string {
-										s := platformName(d()) + " · " + d().Short
-										if !d().Self && !d().Synced {
-											s += " · 待同步"
-										}
-										return s
-									}),
-								}},
-								core.Show{When: func() bool { return !d().Self && d().Inbound }, Then: func(cx *core.Scope) core.Node {
-									return ui.Button{Text: "连接", Variant: ui.ButtonOutline,
-										Disabled: func() bool { return connecting.Get() == d().ID },
-										OnPress: func() {
-											id := d().ID
-											connecting.Set(id)
-											g.openMember(id, func() {
-												if connecting.GetUntracked() == id {
-													connecting.Set("")
-												}
-											})
-										}}
-								}},
-								core.Show{When: func() bool { return !d().Self }, Then: func(cx *core.Scope) core.Node {
-									return ui.IconButton{Icon: lucide.X, Label: "移除设备", OnPress: func() { removing.Set(d()) }}
-								}},
-							}}
-						}),
-				),
-				section(text("text-lg font-semibold", "本机访问"),
-					row("允许我的设备直连", func() string {
-						switch m := g.mem(); {
-						case !g.st.Get().AllowControl:
-							return "「允许远程控制」已关闭，直连也随之停止"
-						case m.AllowInbound && m.Serving:
-							return "同组设备可以直接连接本机"
-						case m.AllowInbound:
-							return "正在启动成员监听…"
-						}
-						return "关闭时本机只能连接其他设备"
-					}, ui.Switch{Label: "允许我的设备直连", Checked: func() bool { return g.mem().AllowInbound },
-						OnChange: func(on bool) {
-							policy(func(p *members.Policy) { p.AllowInbound = on; p.Unattended = p.Unattended && on })
-						}}),
-					// Only meaningful while members may dial in.
-					core.Show{When: inbound, Then: func(cx *core.Scope) core.Node {
-						return row("无人值守", func() string {
-							if g.mem().Unattended {
-								return "同组设备连接时不再需要本机确认"
-							}
-							return "默认每次连接都需要在本机点击允许"
-						}, ui.Switch{Label: "无人值守", Checked: func() bool { return g.mem().Unattended },
-							OnChange: func(on bool) { policy(func(p *members.Policy) { p.Unattended = on }) }})
-					}},
-					core.Show{When: inbound, Then: func(cx *core.Scope) core.Node {
-						return row("仅观看", func() string { return "同组设备只能查看屏幕，键鼠和剪贴板均被禁用" },
-							ui.Switch{Label: "仅观看", Checked: func() bool { return g.mem().ViewOnly },
-								OnChange: func(on bool) { policy(func(p *members.Policy) { p.ViewOnly = on }) }})
-					}},
-					row("更换组密钥", func() string { return "旧地址在所有设备签收新密钥前继续提供同步，最长 90 天" },
-						ui.Button{Text: "更换", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.RotateMemberKey, "已更换组密钥") }}),
-					row("退出设备组", func() string { return "通知可达的设备后清除本机的成员身份和密钥" },
-						ui.Button{Text: "退出", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.LeaveMembers, "已退出设备组") }}),
-				),
+			return core.View{Class: "items-center justify-center py-12 gap-3", Children: []core.Node{
+				deviceArt(false, 112), text("text-lg font-semibold", "添加你的第一台设备"),
+				text("text-sm text-muted-foreground", "在两台设备上确认配对码，即可从这里进入桌面。"),
+				assets.ConnectButton{Text: "添加设备", Icon: lucide.Plus, OnPress: func() { pairOpen.Set(true) }},
 			}}
 		}},
+		core.Show{When: func() bool { return g.mem().InGroup }, Then: func(cx *core.Scope) core.Node {
+			return core.Show{When: overview, Then: func(cx *core.Scope) core.Node {
+				return core.View{Class: "gap-6", Children: []core.Node{
+					ui.Collapsible{Text: "设备组管理", Open: manage.Get, OnOpenChange: manage.Set, Content: g.groupControls()},
+					g.deviceOverview(selected),
+				}}
+			}, Else: func(cx *core.Scope) core.Node {
+				return g.deviceLanding(cx, current, connecting, connect, func() { detailID.Set(current().ID) }, openManagement)
+			}}
+		}},
+		g.deviceInfoDialog(detailID, removing),
 		g.pairDialog(cx, pairOpen),
 		g.removeDialog(cx, removing),
 	}}
+}
+
+func (g *gui) groupControls() core.Node {
+	policy := func(change func(*members.Policy)) {
+		m := g.mem()
+		p := members.Policy{AllowInbound: m.AllowInbound, Unattended: m.Unattended, ViewOnly: m.ViewOnly}
+		change(&p)
+		g.run(func() error { return g.be.SetMemberPolicy(p) }, "")
+	}
+	row := func(title string, detail func() string, control core.Node) core.Node {
+		return core.View{Class: "flex-row items-center gap-4 pt-3 border-t border-border", Children: []core.Node{
+			core.View{Class: "flex-1 shrink gap-1", Children: []core.Node{
+				text("text-sm font-semibold", title), textf("text-xs text-muted-foreground", detail),
+			}},
+			control,
+		}}
+	}
+	inbound := func() bool { return g.mem().AllowInbound }
+	return section(textf("text-xs text-muted-foreground", func() string { return "设备组指纹 · " + g.mem().Group }),
+		row("允许我的设备直连", func() string {
+			switch m := g.mem(); {
+			case !g.st.Get().AllowControl:
+				return "「允许远程控制」已关闭，直连也随之停止"
+			case m.AllowInbound && m.Serving:
+				return "同组设备可以直接连接本机"
+			case m.AllowInbound:
+				return "正在启动成员监听…"
+			}
+			return "关闭时本机只能连接其他设备"
+		}, ui.Switch{Label: "允许我的设备直连", Checked: func() bool { return g.mem().AllowInbound },
+			OnChange: func(on bool) {
+				policy(func(p *members.Policy) { p.AllowInbound = on; p.Unattended = p.Unattended && on })
+			}}),
+		// Only meaningful while members may dial in.
+		core.Show{When: inbound, Then: func(cx *core.Scope) core.Node {
+			return row("无人值守", func() string {
+				if g.mem().Unattended {
+					return "同组设备连接时不再需要本机确认"
+				}
+				return "默认每次连接都需要在本机点击允许"
+			}, ui.Switch{Label: "无人值守", Checked: func() bool { return g.mem().Unattended },
+				OnChange: func(on bool) { policy(func(p *members.Policy) { p.Unattended = on }) }})
+		}},
+		core.Show{When: inbound, Then: func(cx *core.Scope) core.Node {
+			return row("仅观看", func() string { return "同组设备只能查看屏幕，键鼠和剪贴板均被禁用" },
+				ui.Switch{Label: "仅观看", Checked: func() bool { return g.mem().ViewOnly },
+					OnChange: func(on bool) { policy(func(p *members.Policy) { p.ViewOnly = on }) }})
+		}},
+		row("更换组密钥", func() string { return "旧地址在所有设备签收新密钥前继续提供同步，最长 90 天" },
+			ui.Button{Text: "更换", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.RotateMemberKey, "已更换组密钥") }}),
+		row("退出设备组", func() string { return "通知可达的设备后清除本机的成员身份和密钥" },
+			ui.Button{Text: "退出", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.LeaveMembers, "已退出设备组") }}),
+	)
 }
 
 func (g *gui) removeDialog(cx *core.Scope, removing *core.Signal[backend.DeviceDTO]) core.Node {
