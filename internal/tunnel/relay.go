@@ -65,9 +65,14 @@ func relayForCode(code, endpoint string) (tailcfg.DERPRegionID, *tailcfg.DERPReg
 	if endpoint == "" {
 		return 0, nil, errors.New("设备代码末位为 0，请配置与对方相同的自建 DERP 中继地址")
 	}
+	return 0, customRelay(endpoint), nil
+}
+
+// customRelay describes a normalized self-hosted endpoint as a tailcat region.
+func customRelay(endpoint string) *tailcfg.DERPRegion {
 	host, port, _ := net.SplitHostPort(endpoint)
 	p, _ := strconv.Atoi(port)
 	// tailcat assigns ID 1 to the first embedded region when decoding an address.
-	return 0, &tailcfg.DERPRegion{RegionID: 1, RegionCode: "custom", RegionName: endpoint,
-		Nodes: []*tailcfg.DERPNode{{RegionID: 1, Name: "1a", HostName: host, DERPPort: p}}}, nil
+	return &tailcfg.DERPRegion{RegionID: 1, RegionCode: "custom", RegionName: endpoint,
+		Nodes: []*tailcfg.DERPNode{{RegionID: 1, Name: "1a", HostName: host, DERPPort: p}}}
 }

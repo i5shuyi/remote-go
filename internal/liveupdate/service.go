@@ -11,10 +11,12 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/i5shuyi/remote-go/internal/backend"
+	"github.com/i5shuyi/remote-go/internal/members"
 	"github.com/nsgo-dev/nsgo/core"
 )
 
@@ -23,19 +25,38 @@ import (
 type Request struct {
 	Op          string
 	Text        string
+	Secret      string // a verification code, for pairing
 	Number, FPS int
 	On          bool
 	Window      WindowRequest
+	Answer      *Answer         `json:",omitempty"`
+	Policy      *members.Policy `json:",omitempty"`
 }
+
+// Proxy is a one-shot loopback connection to an approved member session.
+type Proxy struct{ Addr, Token, Name string }
+
+// Answer is the person's reply to a local prompt.
+type Answer struct {
+	ID      int
+	OK      bool
+	Inbound bool
+}
+
 type WindowRequest struct {
 	Helper, Code, Password, Relay, Local string
 	Quality, FPS                         int
+	// Member asks the worker to dial a "my devices" member; the window
+	// then runs the session through the worker's one-shot proxy.
+	Member                              string
+	MemberAddr, MemberToken, MemberName string
 }
 type WindowResult struct {
 	Target backend.Target
 	Error  string
 }
 type Reply struct {
+	Proxy    *Proxy `json:",omitempty"`
 	State    backend.StateDTO
 	Version  string
 	Windows  int
@@ -48,6 +69,7 @@ type service struct {
 	windows     int
 	stopping    bool
 	lastContact time.Time
+	lastUI      atomic.Int64 // UnixNano of the last main-window poll
 	stop        context.CancelFunc
 	ctx         context.Context
 }
@@ -66,6 +88,8 @@ func Serve(parent context.Context) error {
 	defer stop()
 	s := &service{be: backend.New(), ctx: ctx, stop: stop, lastContact: time.Now()}
 	s.be.Verbose = os.Getenv("RG_VERBOSE") != ""
+	// Local prompts are drawn by the main window, which polls every second.
+	s.be.UIAttached = func() bool { return time.Since(time.Unix(0, s.lastUI.Load())) < 5*time.Second }
 	s.be.StartWithPassword(previous)
 	defer s.be.Stop()
 	go func() { <-ctx.Done(); ln.Close() }()
@@ -132,6 +156,7 @@ func (s *service) dispatch(q Request) (r Reply) {
 	var err error
 	switch q.Op {
 	case "state":
+		s.lastUI.Store(time.Now().UnixNano())
 	case "name":
 		err = s.be.SetName(q.Text)
 	case "password":
@@ -148,17 +173,60 @@ func (s *service) dispatch(q Request) (r Reply) {
 		s.be.ForgetRecent(q.Text)
 	case "kick":
 		s.be.KickViewers()
+	case "pair":
+		err = s.be.PairWith(q.Text, q.Secret)
+	case "answer":
+		if q.Answer != nil {
+			err = s.be.AnswerPrompt(q.Answer.ID, q.Answer.OK, q.Answer.Inbound)
+		}
+	case "member-policy":
+		if q.Policy != nil {
+			err = s.be.SetMemberPolicy(*q.Policy)
+		}
+	case "member-remove":
+		err = s.be.RemoveMember(q.Text, q.On)
+	case "member-rotate":
+		err = s.be.RotateMemberKey()
+	case "member-proxy": // a session window reconnecting
+		s.mu.Unlock()
+		var p Proxy
+		p.Addr, p.Token, p.Name, err = s.be.MemberProxy(q.Text)
+		s.mu.Lock()
+		if err == nil {
+			r.Proxy = &p
+		}
+	case "member-sync":
+		s.be.SyncMembers()
+	case "member-leave", "member-rebuild":
+		op := q.Op
+		s.mu.Unlock() // leaving syncs with peers first
+		if op == "member-leave" {
+			err = s.be.LeaveMembers()
+		} else {
+			err = s.be.RebuildMembers()
+		}
+		s.mu.Lock()
 	case "open":
 		state := s.be.State()
 		w := q.Window
-		if w.Local == "" && w.Code == state.DeviceCode {
+		if w.Local == "" && w.Member == "" && w.Code == state.DeviceCode {
 			err = errors.New("不能连接本机")
 			break
 		}
 		w.Relay, w.Quality, w.FPS = state.RelayAddress, state.Quality, state.FPS
 		s.windows++
 		s.mu.Unlock()
-		err = s.openWindow(w)
+		if w.Member != "" {
+			// Sync and the target's approval happen here, before the window.
+			w.MemberAddr, w.MemberToken, w.MemberName, err = s.be.MemberProxy(w.Member)
+		}
+		if err == nil {
+			err = s.openWindow(w)
+		} else {
+			s.mu.Lock()
+			s.windows--
+			s.mu.Unlock()
+		}
 		s.mu.Lock()
 	case "retire":
 		r.Retiring = s.retire()
@@ -246,6 +314,9 @@ func exchange(q Request) (r Reply, err error) {
 	}
 	defer c.Close()
 	timeout := 60 * time.Second
+	if q.Op == "open" && q.Window.Member != "" || q.Op == "member-proxy" {
+		timeout = members.ApproveTimeout + 80*time.Second
+	}
 	if q.Op == "state" {
 		timeout = 3 * time.Second
 	}
@@ -285,4 +356,17 @@ func start(helper, password string) error {
 // protocol errors must be shown to the user instead of spawning more hosts.
 func missingEndpoint(err error) bool {
 	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// RequestMemberProxy asks the worker for a new member session, from a
+// session window.
+func RequestMemberProxy(member string) (Proxy, error) {
+	r, err := exchange(Request{Op: "member-proxy", Text: member})
+	if err != nil {
+		return Proxy{}, err
+	}
+	if r.Proxy == nil {
+		return Proxy{}, errors.New("会话服务未返回连接")
+	}
+	return *r.Proxy, nil
 }

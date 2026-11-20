@@ -42,6 +42,23 @@ func (g *gui) devSession() {
 			}
 		}()
 	}
+	if page := os.Getenv("RG_DEV_PAGE"); page != "" {
+		// RG_DEV_PAGE=devices opens a page of the main window.
+		g.page.Set(page)
+	}
+	if spec := os.Getenv("RG_DEV_PAIR"); spec != "" {
+		// RG_DEV_PAIR=<device code>/<verification code>: add that device to
+		// "my devices" once this one is listening, as the add dialog does.
+		code, pw, _ := strings.Cut(spec, "/")
+		go func() {
+			for i := 0; i < 60 && g.st.GetUntracked().Net != "ready"; i++ {
+				time.Sleep(time.Second)
+			}
+			if err := g.be.PairWith(code, pw); err != nil {
+				log.Printf("RG_DEV_PAIR: %v", err)
+			}
+		}()
+	}
 	if spec := os.Getenv("RG_DEV_CONNECT"); spec != "" {
 		// RG_DEV_CONNECT=<device code>/<verification code>: connect through
 		// tailcat exactly as the password dialog does.

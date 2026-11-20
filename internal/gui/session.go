@@ -184,6 +184,9 @@ func (g *gui) openSessionWith(dial func(client.Config, client.Handler) (*backend
 		r.cfg = core.NewSignal(g.app, cfg)
 		r.link.SetControl(t.Control)
 		title := fmt.Sprintf("%s（%s）- Remote Go", t.Name, groupCode(t.Code))
+		if t.Member != "" {
+			title = t.Name + "（我的设备）- Remote Go"
+		}
 		r.win = desktop.OpenWindow(g.app, desktop.WindowOptions{Title: title, Width: 1280, Height: 800,
 			Constraints: core.WindowConstraints{MinWidth: 640, MinHeight: 400}}, func(cx *core.Scope) core.Node {
 			view := g.sessionView(cx, r)

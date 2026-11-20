@@ -24,6 +24,7 @@ import (
 
 	"tailscale.com/tailcfg"
 
+	"github.com/i5shuyi/remote-go/internal/backend"
 	"github.com/i5shuyi/remote-go/internal/gui"
 	"github.com/i5shuyi/remote-go/internal/host"
 	"github.com/i5shuyi/remote-go/internal/liveupdate"
@@ -105,6 +106,7 @@ func runHost(ctx context.Context, args []string, localOnly bool) error {
 	viewOnly := fs.Bool("view-only", false, "仅允许观看，不接受键鼠控制")
 	addr := fs.String("addr", "127.0.0.1:7900", "local 模式下的监听地址")
 	verbose := fs.Bool("v", false, "输出 tailcat 调试日志")
+	withMembers := fs.Bool("members", false, "同时为「我的设备」提供免码连接（使用桌面应用已配对的身份）")
 	var relay string
 	var region int
 	if !localOnly {
@@ -149,6 +151,13 @@ func runHost(ctx context.Context, args []string, localOnly bool) error {
 		viewCmd += " -derp " + endpoint
 	}
 	banner(code, h.Code(), fmt.Sprintf("%s -p %s %s", viewCmd, h.Code(), code))
+	if *withMembers {
+		go func() {
+			if err := backend.ServeMembers(ctx, h, tunnel.Logf(*verbose)); err != nil {
+				log.Printf("我的设备不可用：%v", err)
+			}
+		}()
+	}
 	return h.Serve(ln)
 }
 

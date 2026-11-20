@@ -28,6 +28,7 @@ type settingsBackend interface {
 	SetDefaults(int, int)
 	ForgetRecent(string)
 	KickViewers()
+	membersBackend
 }
 
 type gui struct {
@@ -120,11 +121,13 @@ func (g *gui) main(cx *core.Scope) core.Node {
 			core.Scroll{Style: core.Style{FlexGrow: 1, FlexShrink: 1}, Children: []core.Node{
 				core.View{Class: "px-7 pb-7 gap-5", Children: []core.Node{
 					core.Show{When: func() bool { return g.page.Get() == "home" }, Then: g.home},
+					core.Show{When: func() bool { return g.page.Get() == "devices" }, Then: g.devices},
 					core.Show{When: func() bool { return g.page.Get() == "settings" }, Then: g.settings},
 				}},
 			}},
 		}},
 		g.passwordDialog(cx),
+		g.promptDialog(cx),
 		ui.Toasts{Toaster: g.toasts},
 	}}
 }
@@ -155,6 +158,7 @@ func (g *gui) sidebar(cx *core.Scope) core.Node {
 			text("text-base font-semibold", "Remote Go"),
 		}},
 		nav("home", "远程控制", lucide.Monitor),
+		nav("devices", "我的设备", lucide.MonitorSmartphone),
 		nav("settings", "设置", lucide.Settings),
 		core.View{Class: "flex-1"},
 		core.View{Class: "flex-row items-center gap-2 px-2 py-2", Children: []core.Node{

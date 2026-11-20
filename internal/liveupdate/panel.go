@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/nsgo-dev/nsgo/core"
+
+	"github.com/i5shuyi/remote-go/internal/members"
 )
 
 // Panel talks only to the local session service. Serialization of a version
@@ -114,6 +116,25 @@ func (p *Panel) SetDefaults(quality, fps int) {
 }
 func (p *Panel) ForgetRecent(code string) { p.report(Request{Op: "forget", Text: code}) }
 func (p *Panel) KickViewers()             { p.report(Request{Op: "kick"}) }
+func (p *Panel) PairWith(code, password string) error {
+	return p.command(Request{Op: "pair", Text: code, Secret: password})
+}
+func (p *Panel) AnswerPrompt(id int, ok, inbound bool) error {
+	return p.command(Request{Op: "answer", Answer: &Answer{ID: id, OK: ok, Inbound: inbound}})
+}
+func (p *Panel) SetMemberPolicy(pol members.Policy) error {
+	return p.command(Request{Op: "member-policy", Policy: &pol})
+}
+func (p *Panel) RemoveMember(id string, rotate bool) error {
+	return p.command(Request{Op: "member-remove", Text: id, On: rotate})
+}
+func (p *Panel) RotateMemberKey() error { return p.command(Request{Op: "member-rotate"}) }
+func (p *Panel) SyncMembers()           { p.report(Request{Op: "member-sync"}) }
+func (p *Panel) LeaveMembers() error    { return p.command(Request{Op: "member-leave"}) }
+func (p *Panel) RebuildMembers() error  { return p.command(Request{Op: "member-rebuild"}) }
+func (p *Panel) OpenMember(id string) error {
+	return p.command(Request{Op: "open", Window: WindowRequest{Helper: filepath.Base(p.helper), Member: id}})
+}
 func (p *Panel) Open(code, password, local string) error {
 	return p.command(Request{Op: "open", Window: WindowRequest{Helper: filepath.Base(p.helper), Code: code, Password: password, Local: local}})
 }

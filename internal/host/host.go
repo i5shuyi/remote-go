@@ -56,14 +56,20 @@ type Config struct {
 	ViewOnly bool   // ignore input events
 	// OnChange, if set, is called whenever a viewer connects or disconnects.
 	OnChange func()
+	// PairToken, if set, issues a single-use pairing token to a controller
+	// that proves the verification code ("my devices"). The /api/info
+	// greeting then advertises "members": 1.
+	PairToken func() []byte
 }
 
 // SessionInfo describes a connected viewer.
 type SessionInfo struct {
-	ID    int       `json:"id"`
-	Node  string    `json:"node"`
-	Login string    `json:"login"`
-	Since time.Time `json:"since"`
+	ID       int       `json:"id"`
+	Node     string    `json:"node"`
+	Login    string    `json:"login"`
+	Since    time.Time `json:"since"`
+	Member   string    `json:"member,omitempty"` // member ID for "my devices" sessions
+	ViewOnly bool      `json:"viewOnly,omitempty"`
 }
 
 type liveSession struct {
@@ -84,6 +90,9 @@ type Server struct {
 	draining    bool
 	nextID      int
 	sessions    map[int]*liveSession
+	// inputPaused is the local input barrier raised while a security
+	// prompt is on screen: remote input is dropped, not queued.
+	inputPaused atomic.Bool
 }
 
 func New(cfg Config) (*Server, error) {
@@ -143,6 +152,55 @@ func (s *Server) Kick() {
 	}
 }
 
+// KickCodeSessions disconnects viewers that came in with the device code,
+// leaving "my devices" sessions alone (the codes changed).
+func (s *Server) KickCodeSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ls := range s.sessions {
+		if ls.info.Member == "" {
+			ls.cancel()
+		}
+	}
+}
+
+// SetName changes the name new viewers see.
+func (s *Server) SetName(name string) {
+	s.mu.Lock()
+	s.cfg.Name = name
+	s.mu.Unlock()
+}
+
+func (s *Server) name() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.Name
+}
+
+// KickMember disconnects the sessions of one member.
+func (s *Server) KickMember(member string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, ls := range s.sessions {
+		if ls.info.Member == member {
+			ls.cancel()
+		}
+	}
+}
+
+// InputPaused reports whether the input barrier is up.
+func (s *Server) InputPaused() bool { return s.inputPaused.Load() }
+
+// PauseInput raises or lowers the input barrier. Raising it releases every
+// key and button remote sessions hold; events arriving meanwhile are
+// discarded so none can answer a local prompt.
+func (s *Server) PauseInput(on bool) {
+	s.inputPaused.Store(on)
+	if on && s.inj != nil {
+		s.inj.ReleaseAll()
+	}
+}
+
 func (s *Server) changed() {
 	if s.cfg.OnChange != nil {
 		go s.cfg.OnChange()
@@ -159,14 +217,79 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /", http.FileServerFS(webui.HostFS()))
 	mux.HandleFunc("GET /ws", s.handleWS)
-	mux.HandleFunc("GET /api/info", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"name": s.cfg.Name, "os": runtime.GOOS, "control": s.inj != nil,
+	mux.HandleFunc("GET /api/info", s.handleInfo)
+	if s.cfg.PairToken != nil {
+		mux.HandleFunc("POST /api/pair-token", func(w http.ResponseWriter, r *http.Request) {
+			if err := s.checkCode(r.URL.Query().Get("code")); err != nil {
+				time.Sleep(500 * time.Millisecond)
+				http.Error(w, err.Error(), http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"token": s.cfg.PairToken()})
 		})
-	})
+	}
 	return mux
 }
+
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	info := map[string]any{"name": s.name(), "os": runtime.GOOS, "control": s.inj != nil}
+	if s.cfg.PairToken != nil {
+		info["members"] = 1
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
+// MemberPeer is an authenticated, approved "my devices" controller.
+type MemberPeer struct {
+	ID       string // full member ID
+	Name     string
+	ViewOnly bool // input and clipboard are refused for the whole session
+}
+
+// ServeMember runs the desktop protocol on a connection the member layer
+// has already authenticated and approved. It returns when the session
+// ends or ctx is cancelled (revocation).
+func (s *Server) ServeMember(ctx context.Context, conn net.Conn, peer MemberPeer) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/info", s.handleInfo)
+	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
+		r = r.WithContext(ctx)
+		s.acceptWS(w, r, SessionInfo{Node: peer.Name, Login: "我的设备", Member: peer.ID, ViewOnly: peer.ViewOnly})
+	})
+	ln := &oneConn{c: conn, done: make(chan struct{})}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second,
+		ConnState: func(_ net.Conn, st http.ConnState) {
+			if st == http.StateClosed {
+				ln.Close()
+			}
+		}}
+	stop := context.AfterFunc(ctx, func() { srv.Close() })
+	defer stop()
+	srv.Serve(ln)
+	<-ln.done
+	srv.Close()
+}
+
+// oneConn is a listener that yields a single connection.
+type oneConn struct {
+	c    net.Conn
+	once sync.Once
+	used bool
+	done chan struct{}
+}
+
+func (l *oneConn) Accept() (net.Conn, error) {
+	if !l.used {
+		l.used = true
+		return l.c, nil
+	}
+	<-l.done
+	return nil, net.ErrClosed
+}
+func (l *oneConn) Close() error   { l.once.Do(func() { close(l.done) }); return nil }
+func (l *oneConn) Addr() net.Addr { return l.c.LocalAddr() }
 
 func (s *Server) Serve(ln net.Listener) error {
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
@@ -218,6 +341,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	s.acceptWS(w, r, SessionInfo{Node: node, Login: login})
+}
+
+// acceptWS runs an authenticated viewer's session.
+func (s *Server) acceptWS(w http.ResponseWriter, r *http.Request, info SessionInfo) {
+	login, node := info.Login, info.Node
 	s.mu.Lock()
 	if s.draining {
 		s.mu.Unlock()
@@ -241,7 +370,8 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.nextID++
 	id := s.nextID
-	s.sessions[id] = &liveSession{info: SessionInfo{ID: id, Node: node, Login: login, Since: time.Now()}, cancel: cancel}
+	info.ID, info.Since = id, time.Now()
+	s.sessions[id] = &liveSession{info: info, cancel: cancel}
 	s.mu.Unlock()
 	s.changed()
 	defer func() {
@@ -251,7 +381,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.changed()
 	}()
 
-	sess := &session{s: s, c: c, bounds: screenshot.GetDisplayBounds(s.cfg.Display),
+	sess := &session{s: s, c: c, bounds: screenshot.GetDisplayBounds(s.cfg.Display), viewOnly: info.ViewOnly,
 		wantH264: r.URL.Query().Get("codec") == "h264",
 		reconf:   make(chan struct{}, 1), kf: make(chan struct{}, 1)}
 	sess.quality.Store(70)
@@ -269,6 +399,7 @@ type session struct {
 	fps       atomic.Int32
 	maxW      atomic.Int32
 	kick      chan struct{}
+	viewOnly  bool // no input or clipboard for this session
 
 	wantH264 bool          // viewer can decode H.264 (WebCodecs)
 	reconf   chan struct{} // quality/fps/size changed
@@ -298,8 +429,8 @@ func (ss *session) run(ctx context.Context) {
 
 	_, rich := ss.s.clipboard.(clipshare.RichBoard)
 	info, _ := json.Marshal(map[string]any{
-		"t": "info", "name": ss.s.cfg.Name, "w": ss.bounds.Dx(), "h": ss.bounds.Dy(),
-		"clipboardRich": rich && ss.s.CanControl(), "control": ss.s.inj != nil, "clipboard": ss.s.clipboard != nil && ss.s.CanControl(),
+		"t": "info", "name": ss.s.name(), "w": ss.bounds.Dx(), "h": ss.bounds.Dy(),
+		"clipboardRich": rich && ss.canInput(), "control": ss.canInput(), "clipboard": ss.s.clipboard != nil && ss.canInput(),
 	})
 	if err := ss.c.Write(ctx, websocket.MessageText, info); err != nil {
 		return
@@ -324,6 +455,8 @@ func (ss *session) run(ctx context.Context) {
 	ss.stream(ctx)
 }
 
+func (ss *session) canInput() bool { return ss.s.inj != nil && !ss.viewOnly }
+
 func (ss *session) abs(x, y float64) (float64, float64) {
 	x, y = clamp01(x), clamp01(y)
 	return float64(ss.bounds.Min.X) + x*float64(ss.bounds.Dx()),
@@ -333,7 +466,7 @@ func (ss *session) abs(x, y float64) (float64, float64) {
 func (ss *session) handle(ctx context.Context, m inMsg) {
 	switch m.T {
 	case "clip":
-		if ctx.Err() == nil && ss.s.CanControl() && !ss.s.cfg.ViewOnly {
+		if ctx.Err() == nil && ss.canInput() && !ss.s.cfg.ViewOnly && !ss.s.inputPaused.Load() {
 			if reply := ss.clipboard.HandleContext(ctx, ss.s.clipboard, m.Message); reply != nil {
 				ss.sendJSON(ctx, reply.Packet())
 			}
@@ -365,7 +498,7 @@ func (ss *session) handle(ctx context.Context, m inMsg) {
 		return
 	}
 	inj := ss.s.inj
-	if inj == nil {
+	if !ss.canInput() || ss.s.inputPaused.Load() {
 		return
 	}
 	switch m.T {

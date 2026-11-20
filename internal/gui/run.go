@@ -50,7 +50,7 @@ func Run() error {
 
 		if local != nil {
 			g.be = local
-			local.OnChange = func() { app.Post(func() { g.st.Set(local.State()) }) }
+			local.OnChange = func() { app.Post(func() { g.setState(local.State()) }) }
 			local.Verbose = os.Getenv("RG_VERBOSE") != ""
 			local.Start()
 			g.st.Set(local.State())
@@ -105,7 +105,7 @@ func (g *gui) pollService(ctx context.Context, startDev bool) {
 				startDev = false
 			}
 			g.app.Post(func() {
-				g.st.Set(state)
+				g.setState(state)
 				if launchDev {
 					g.devSession()
 				}
@@ -116,5 +116,15 @@ func (g *gui) pollService(ctx context.Context, startDev bool) {
 			return
 		case <-time.After(time.Second):
 		}
+	}
+}
+
+// setState publishes worker state; a new local prompt brings the main
+// window forward so the person sees it.
+func (g *gui) setState(s backend.StateDTO) {
+	before := len(g.st.GetUntracked().Members.Prompts)
+	g.st.Set(s)
+	if len(s.Members.Prompts) > before {
+		g.showMain()
 	}
 }
