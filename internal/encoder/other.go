@@ -1,4 +1,4 @@
-//go:build !(darwin && cgo) && !(windows && (amd64 || arm64))
+//go:build !(darwin && cgo) && !(windows && (amd64 || arm64)) && !(linux && !android)
 
 package encoder
 

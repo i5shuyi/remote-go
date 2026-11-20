@@ -16,6 +16,7 @@ import (
 
 	"github.com/i5shuyi/remote-go/internal/backend"
 	"github.com/i5shuyi/remote-go/internal/client"
+	"github.com/i5shuyi/remote-go/internal/encoder"
 	"github.com/i5shuyi/remote-go/internal/liveupdate"
 	"github.com/i5shuyi/remote-go/internal/screen"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
@@ -53,7 +54,7 @@ func SessionWindow() error {
 			}
 			if w.Local != "" {
 				var d net.Dialer
-				s, err := client.Dial(ctx, d.DialContext, w.Local, w.Password, true, cfg, h)
+				s, err := client.Dial(ctx, d.DialContext, w.Local, w.Password, encoder.CanDecodeH264(), cfg, h)
 				if err != nil {
 					return nil, err
 				}

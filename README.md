@@ -1,3 +1,5 @@
+<img src="assets/Icon.png" alt="Remote Go logo" width="96" height="96">
+
 # remote-go
 
 **English** · [简体中文](README.zh-CN.md)
@@ -33,7 +35,7 @@ Argon2id(verification code, salt = "remote-go/tailcat/v1|" + device code, t=3, m
 
 ## Configure a tailcat relay
 
-On the desktop, open **Settings → Local bootstrap relay** (设置 → 本机引导中继), choose a relay, and click **Apply** (应用).
+On the desktop, open **Settings → Network → Local bootstrap relay** (设置 → 网络 → 本机引导中继), choose a relay, and click **Apply** (应用).
 
 - **Automatic** measures latency to the public relays and saves the selection so the device code stays the same across restarts.
 - **Public region** lets you choose New York, San Francisco, Frankfurt, or Tokyo. The controller reads the region from the last digit of the host's device code.
@@ -48,6 +50,7 @@ Download an installer from [GitHub Releases](https://github.com/i5shuyi/remote-g
 ```bash
 sh scripts/build.sh mac       # → bin/build-mac/<version>/releases/*.dmg
 sh scripts/build.sh windows   # → bin/build-windows/<version>/releases/*-setup.exe (requires makensis)
+sh scripts/build.sh linux     # → bin/build-linux/<version>/releases/*.deb, *.AppImage (amd64 and arm64)
 ```
 
 1. On the **host**, the **Local device** (本机设备) card shows a nine-digit **device code** and an eight-character **verification code** by default. You can copy the device code, generate a new verification code, or set a fixed password in Settings. The lower-left corner shows the relay region.
@@ -57,10 +60,24 @@ sh scripts/build.sh windows   # → bin/build-windows/<version>/releases/*-setup
 5. Closing the main window leaves the host running in the macOS menu bar or Windows notification area. Use its menu to reopen the window or quit. On macOS you can also quit with ⌘Q.
 6. If the peer quits or loses its network connection, the session detects the missing heartbeat within six seconds. The disconnect screen shows the reason and lets you reconnect.
 
-The desktop interface uses AppKit views on macOS and Direct2D on Windows. The remote screen is a native component registered with NSGo (`internal/screen`, `core.Native`). [NSGo](https://github.com/nsgo-dev/nsgo)
+The desktop interface uses AppKit views on macOS, Direct2D on Windows and GTK 4 on Linux. The remote screen is a native component registered with NSGo (`internal/screen`, `core.Native`). [NSGo](https://github.com/nsgo-dev/nsgo)
 
 - **macOS** uses an `NSView` with an `AVSampleBufferDisplayLayer`. The client converts Annex-B video into AVCC-formatted `CMSampleBuffer` objects for VideoToolbox hardware decoding. The system compositor displays the result without a CPU copy. The view handles native keyboard and mouse events, including physical key codes, left and right modifiers, and Command shortcuts.
 - **Windows** embeds a child `HWND` in the NSGo window. A Media Foundation H.264 decoder (MFT) outputs NV12, which the client converts to BGRA and scales with GDI. Keyboard input uses layout-independent scan codes.
+- **Linux** hosts a GTK 4 widget in the NSGo window. GStreamer decodes H.264 (VA-API or NVDEC when available, otherwise `avdec_h264` or OpenH264) into a `GtkPicture`. Keyboard input uses layout-independent evdev keycodes. Without a GStreamer H.264 decoder the controller asks the host for JPEG.
+
+On Linux, the host encodes H.264 with the first GStreamer encoder that starts (`vah264enc`, `vaapih264enc`, `nvh264enc`, `x264enc`, `openh264enc`) and falls back to JPEG. The shared clipboard syncs text through the X11 `CLIPBOARD` selection (no images or files yet).
+
+- **X11** captures the screen with `ximagesrc` and injects keyboard and mouse input through XTEST.
+- **Wayland** goes through xdg-desktop-portal. The host opens one RemoteDesktop session with screen sharing (ScreenCast only for `-view-only`), records its PipeWire stream with `pipewiresrc`, and sends input through the portal by evdev keycode. When the host starts, the desktop asks which screens to share and whether to allow remote control. Someone at the computer must approve the first time. The portal's restore token is saved under `~/.config/remote-go/`, so later sessions start without asking until the permission is revoked. Text from the Android keyboard is sent as keysyms, so characters the host's layout lacks, such as Chinese, are skipped. The clipboard works only where the compositor bridges XWayland's clipboard, as GNOME and KDE do. The JPEG fallback still uses portal screenshots, which are slow.
+
+GTK 4 and GStreamer load at runtime, so install them from your distribution, for example on Debian or Ubuntu:
+
+```bash
+sudo apt install libgtk-4-1 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-vaapi gstreamer1.0-pipewire xdg-desktop-portal
+```
+
+Releases include a `.deb` for amd64 and arm64. It installs the app in `/opt/remote-go`, adds `remote-go` to the path and a menu entry, and pulls in the required GStreamer plugins, with the hardware codecs and the PipeWire and portal packages as recommendations. Install it with `sudo apt install ./remote-go-<version>-linux-x64.deb`. Releases also include an AppImage for each architecture. It needs FUSE and does not bundle GTK 4 or GStreamer, so install those from your distribution first, then `chmod +x` the file and run it. Updates open the release page for AppImage users, who download the new file themselves. Other distributions can also build the binary with `GOOS=linux CGO_ENABLED=0 go build -o remote-go .`
 
 The Go session client (`internal/client`) opens its WebSocket directly through the tailcat tunnel. Use these environment variables for development and debugging.
 
@@ -83,7 +100,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.apk
+adb install -r bin/build-android/0.5.0/releases/remote-go-0.5.0-android-arm64.apk
 ```
 
 Building the APK requires Python 3.9+, JDK 17+, Android SDK Platform 34 or later, and Build Tools 36+ with d8. Use `ANDROID_HOME` to specify the SDK location.
@@ -96,14 +113,14 @@ Use Android to control a computer by entering the codes shown on its desktop. Re
   - In trackpad mode, move one finger to move the pointer, tap to left-click, tap with two fingers to right-click, and tap then press and drag to drag an item.
   - In either mode, scroll with two fingers or pinch to zoom up to 5×.
 - **Shared clipboard.** Enable sharing manually in the session panel. After copying text, a screenshot, or files on the phone, return to the session to sync them to the computer. File managers must put files on the Android system clipboard for sharing to work. A copy held inside another app is inaccessible to Remote Go.
-- **Keyboard.** The input field sends Unicode text in a `tx` message. The host uses `CGEventKeyboardSetUnicodeString` on macOS and `KEYEVENTF_UNICODE` on Windows, so Chinese input works independently of the host keyboard layout. An extra row supplies Esc, Tab, arrows, Del, Home/End, F5, and other keys. Tap Ctrl, Alt, Shift, or ⌘ (Win) to apply the modifier to the next key.
+- **Keyboard.** The input field sends Unicode text in a `tx` message. The host uses `CGEventKeyboardSetUnicodeString` on macOS, `KEYEVENTF_UNICODE` on Windows and temporary keysym bindings on Linux X11, so Chinese input works independently of the host keyboard layout. An extra row supplies Esc, Tab, arrows, Del, Home/End, F5, and other keys. Tap Ctrl, Alt, Shift, or ⌘ (Win) to apply the modifier to the next key.
 - **Networking.** The Go program runs as a regular Android executable with restricted access to the network interface list. tailcat uses Tailscale's `androidbin` and `androiddns` packages for interface discovery and DNS.
 - The screen stays awake during a session. The Android Back button dismisses the keyboard, then the toolbar, then asks whether to disconnect. As on desktop, you can reconnect from the disconnect screen.
 - To debug the mobile layout on a desktop, run `RG_MOBILE=1 ./remote-go`. It opens the same interface in a phone-sized window. WKWebView on macOS also supports WebCodecs.
 
 ## Updates and releases
 
-Starting with 0.3.0, desktop **Settings** (设置) and Android **Default settings** (默认设置) show the current version and offer **Check for updates** (检查更新). Release builds check daily by default. macOS updates through Sparkle. Windows updates the current user's installation through WinSparkle. Android verifies the APK and opens the system installer. Users on 0.2.x or earlier need to install a version with the updater manually once.
+Starting with 0.3.0, desktop **Settings** (设置) and Android **Default settings** (默认设置) show the current version and offer **Check for updates** (检查更新). Release builds check daily by default. macOS updates through Sparkle. Windows updates the current user's installation through WinSparkle. On Linux, an installation from the `.deb` downloads the signed package, installs it with `pkexec dpkg` (which asks for an administrator password), and restarts. The AppImage opens the release page instead. Android verifies the APK and opens the system installer. Users on 0.2.x or earlier need to install a version with the updater manually once.
 
 Desktop builds starting with 0.4.0 can replace the main application during a remote session. The host keeps its tunnel and verification code, and each controller window keeps its video, keyboard input, and ongoing clipboard transfers. During an active session the new main interface starts in the menu bar or notification area. Choose **打开 Remote Go** to open it. New controller windows use the installed version. The host worker switches when its viewers and session windows have closed. Choosing **退出 Remote Go** from the main application's tray menu still ends all sessions.
 
@@ -111,9 +128,9 @@ Schedule the first upgrade from 0.3.0 between sessions. On macOS, if prompted, g
 
 Each OS and architecture reads its own `appcast-<target>.xml` from the latest GitHub Release. The feed points to the full installer under the corresponding version tag. Each package has an Ed25519 signature.
 
-GitHub Actions runs the Go tests and builds the four preview installers for pull requests, pushes to `main`, and manual runs. Download the seven-day test artifact from the **Build and release** workflow. Preview APKs use a temporary signing identity.
+GitHub Actions runs the Go tests and builds the eight preview packages for pull requests, pushes to `main`, and manual runs. Download the seven-day test artifact from the **Build and release** workflow. Preview APKs use a temporary signing identity.
 
-To release, commit the new `version` in `nsgo.yaml` and push the matching stable tag, for example `v0.5.0`. The tag workflow uses the `NSGO_UPDATES_KEY` and `ANDROID_SIGNING_PEM` Actions secrets for the existing update and APK signing identities. It verifies the signed files, checks all 16 draft assets, publishes the release as **Latest**, then downloads the public feeds and installers to verify them. Rerun a failed release job to resume its draft or recheck an already published version.
+To release, commit the new `version` in `nsgo.yaml` and push the matching stable tag, for example `v0.5.0`. The tag workflow uses the `NSGO_UPDATES_KEY` and `ANDROID_SIGNING_PEM` Actions secrets for the existing update and APK signing identities. It verifies the signed files, checks all 28 draft assets, publishes the release as **Latest**, then downloads the public feeds and installers to verify them. Rerun a failed release job to resume its draft or recheck an already published version.
 
 For a local signed build, run `sh scripts/build.sh release` on macOS with Go, the Xcode command line tools, NSIS and the Android tools listed above. The script reads the update key from `NSGO_UPDATES_KEY` or `~/.config/remote-go/updates.key`, and the APK signing identity from `.nsgo/android/debug.pem`. Keep independent backups of both private keys.
 

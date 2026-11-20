@@ -40,14 +40,18 @@ jobs:
       - name: Install NSIS
         run: command -v makensis || brew install makensis
       - run: go test ./...
+      - name: Check the Linux build
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go vet ./...
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
       - name: Build preview installers
         if: github.event_name != 'push' || github.ref_type != 'tag'
         run: |
           mkdir dist
-          for platform in mac windows android; do
+          for platform in mac windows linux android; do
             sh scripts/build.sh "$platform"
           done
-          cp bin/build-mac/*/releases/*.dmg bin/build-windows/*/releases/*-setup.exe bin/build-android/*/releases/*.apk dist/
+          cp bin/build-mac/*/releases/*.dmg bin/build-windows/*/releases/*-setup.exe bin/build-linux/*/releases/*.deb bin/build-linux/*/releases/*.AppImage bin/build-android/*/releases/*.apk dist/
       - name: Sign and verify release installers and feeds
         if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
@@ -65,7 +69,7 @@ jobs:
           mkdir dist
           cd "bin/signed/$VERSION/releases"
           shasum -a 256 -c ./*.sha256
-          cp ./*.xml ./*.dmg ./*.exe ./*.apk ./*.sha256 "$GITHUB_WORKSPACE/dist/"
+          cp ./*.xml ./*.dmg ./*.exe ./*.deb ./*.AppImage ./*.apk ./*.sha256 "$GITHUB_WORKSPACE/dist/"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installers-${{ steps.version.outputs.version }}

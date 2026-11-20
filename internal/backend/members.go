@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/i5shuyi/remote-go/internal/client"
+	"github.com/i5shuyi/remote-go/internal/encoder"
 	"github.com/i5shuyi/remote-go/internal/host"
 	"github.com/i5shuyi/remote-go/internal/members"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
@@ -681,7 +682,7 @@ func sessionOver(ctx context.Context, conn net.Conn, tc *tunnel.Conn, cfg client
 			onClose(err)
 		}
 	}
-	s, err := client.Dial(ctx, dial, fmt.Sprintf("remote-go:%d", tunnel.MemberPort), "", true, cfg, h)
+	s, err := client.Dial(ctx, dial, fmt.Sprintf("remote-go:%d", tunnel.MemberPort), "", encoder.CanDecodeH264(), cfg, h)
 	if err != nil {
 		conn.Close()
 		if tc != nil {

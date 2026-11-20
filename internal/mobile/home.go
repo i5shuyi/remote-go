@@ -9,6 +9,7 @@ import (
 	"github.com/nsgo-dev/nsgo/ui"
 	"github.com/nsgo-dev/nsgo/updater"
 
+	"github.com/i5shuyi/remote-go/assets"
 	"github.com/i5shuyi/remote-go/internal/backend"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
 )
@@ -89,20 +90,11 @@ func (a *app) home(cx *core.Scope) core.Node {
 	safe := core.Style{FlexGrow: 1, PaddingEnv: core.EnvEdges{Top: core.EnvSafeArea, Bottom: core.EnvSafeArea}}
 	return core.View{Style: safe, Children: []core.Node{core.Scroll{Style: core.Style{FlexGrow: 1}, Children: []core.Node{
 		core.View{Class: "px-5 pb-8 gap-5", Children: []core.Node{
-			// Header
-			core.View{Class: "flex-row items-center gap-3 pt-6", Children: []core.Node{
-				core.View{Class: "w-[44px] h-[44px] rounded-xl bg-primary items-center justify-center", Children: []core.Node{
-					icon(lucide.MonitorSmartphone, "w-[24px] h-[24px] text-primary-foreground"),
-				}},
-				core.View{Class: "gap-0.5", Children: []core.Node{
-					text("text-xl font-semibold", "Remote Go"),
-					text("text-xs text-muted-foreground", "远程控制电脑 · 无需账号，点对点加密"),
-				}},
+			core.View{Class: "flex-row items-center gap-1 pt-5", Children: []core.Node{
+				assets.Logo(), text("text-base font-semibold", "Remote Go"),
 			}},
-
-			// Connect card
-			core.View{Class: "rounded-2xl bg-card border border-border p-5 gap-4", Children: []core.Node{
-				text("text-lg font-semibold", "远程控制设备"),
+			core.View{Class: "gap-4", Children: []core.Node{
+				text("text-2xl font-semibold", "连接其他设备"),
 				field("对方的设备代码", ui.Input{Placeholder: "9 位数字", Value: code.Get, OnChange: code.Set, Label: "设备代码",
 					KeyboardType: core.KeyboardNumber, MaxLength: 11, ReturnKeyType: core.ReturnKeyNext,
 					OnSubmit: func(string) { pwRef.Focus() }, Style: inputStyle}),
@@ -112,11 +104,11 @@ func (a *app) home(cx *core.Scope) core.Node {
 				core.Show{When: func() bool { return errText.Get() != "" }, Then: func(*core.Scope) core.Node {
 					return textf("text-sm text-red-500", errText.Get)
 				}},
-				ui.Button{Text: "连接", Size: ui.SizeLarge, Busy: busy.Get, OnPress: connect, Style: core.Style{Height: core.Pt(46)}},
+				assets.ConnectButton{Text: "连接", Size: ui.SizeLarge, Busy: busy.Get, OnPress: connect, Style: core.Style{Height: core.Pt(46)}},
 				core.Show{When: busy.Get, Then: func(*core.Scope) core.Node {
 					return textf("text-xs text-muted-foreground text-center", func() string {
 						c := tunnel.Normalize(code.Get())
-						return "正在经" + backend.RegionName(c) + "中继建立加密隧道，能打洞时自动切换为直连…"
+						return "正在通过" + backend.RegionName(c) + "中继连接…"
 					})
 				}},
 			}},
@@ -126,14 +118,14 @@ func (a *app) home(cx *core.Scope) core.Node {
 			// Recent devices
 			core.Show{When: func() bool { return len(a.recent.Get()) > 0 }, Then: func(cx *core.Scope) core.Node {
 				return core.View{Class: "gap-2", Children: []core.Node{
-					text("text-sm text-muted-foreground px-1", "最近连接"),
-					core.View{Class: "rounded-2xl bg-card border border-border overflow-hidden", Children: []core.Node{
+					text("text-base font-semibold", "最近连接"),
+					core.View{Class: "overflow-hidden border-t border-border", Children: []core.Node{
 						core.Each(a.recent.Get, func(r Recent) string { return r.Code }, func(cx *core.Scope, r func() Recent, _ func() int) core.Node {
 							return core.View{Label: "连接", OnPress: func(core.PressEvent) {
 								code.Set(r().Code)
 								errText.Set("")
 								pwRef.Focus()
-							}, Class: "flex-row items-center gap-3 px-4 py-3 border-b border-border", Children: []core.Node{
+							}, Class: "flex-row items-center gap-3 py-3 border-b border-border", Children: []core.Node{
 								icon(lucide.Monitor, "w-[22px] h-[22px] text-muted-foreground"),
 								core.View{Class: "flex-1 gap-0.5", Children: []core.Node{
 									textf("text-base font-medium", func() string { return r().Name }),
@@ -154,8 +146,8 @@ func (a *app) home(cx *core.Scope) core.Node {
 
 			// Defaults
 			core.View{Class: "gap-2", Children: []core.Node{
-				text("text-sm text-muted-foreground px-1", "默认设置"),
-				core.View{Class: "rounded-2xl bg-card border border-border px-4 py-1", Children: []core.Node{
+				text("text-base font-semibold", "默认设置"),
+				core.View{Class: "border-t border-border", Children: []core.Node{
 					a.settingRow("画质", ui.Select[int]{Options: qualities, Label: "画质", Value: func() int { return a.settings.Get().Quality },
 						OnChange: func(v int) { st := a.settings.Get(); st.Quality = v; a.saveSettings(st) }, Style: core.Style{Width: core.Pt(130)}}),
 					a.settingRow("帧率", ui.Select[int]{Options: rates, Label: "帧率", Value: func() int { return a.settings.Get().FPS },
@@ -186,9 +178,6 @@ func (a *app) home(cx *core.Scope) core.Node {
 					a.notice("中继地址已保存")
 				}},
 			}},
-			text("text-xs text-muted-foreground px-1 leading-5",
-				"在电脑上打开 Remote Go 桌面版，把「设备代码」和「验证码」填到这里即可连接。手机端只做控制端。"+
-					"连接经 tailcat（WireGuard）建立，先走中继，能打洞时自动切换为点对点直连；没有账号，也没有我们的服务器。"),
 		}},
 	}}}}
 }

@@ -9,6 +9,13 @@ import sys
 import tempfile
 
 
+PACKAGES = {"macos_arm64": "macos-arm64.dmg", "windows_x64": "windows-x64-setup.exe",
+            "windows_arm64": "windows-arm64-setup.exe", "linux_x64": "linux-x64.deb",
+            "linux_arm64": "linux-arm64.deb", "android_arm64": "android-arm64.apk"}
+# Packages offered beside the installers, without an update feed of their own.
+EXTRAS = ["linux-x64.AppImage", "linux-arm64.AppImage"]
+
+
 def gh(*args):
     return subprocess.check_output(["gh", *args], text=True).strip()
 
@@ -25,13 +32,11 @@ def digest(path):
 
 
 def release_assets(directory, tag):
-    packages = {"macos_arm64": "macos-arm64.dmg", "windows_x64": "windows-x64-setup.exe",
-                "windows_arm64": "windows-arm64-setup.exe", "android_arm64": "android-arm64.apk"}
-    files = {f"appcast-{target}.xml" for target in packages}
-    files.update(f"remote-go-{tag[1:]}-{suffix}" for suffix in packages.values())
+    files = {f"appcast-{target}.xml" for target in PACKAGES}
+    files.update(f"remote-go-{tag[1:]}-{suffix}" for suffix in [*PACKAGES.values(), *EXTRAS])
     expected = files | {f"{name}.sha256" for name in files}
     if {p.name for p in directory.iterdir()} != expected:
-        raise ValueError("Expected four installers, four feeds and eight checksum files")
+        raise ValueError(f"Expected {len(PACKAGES)} installers and feeds and {len(EXTRAS)} AppImages, each with a checksum file")
     for name in files:
         checksum, filename = (directory / (name + ".sha256")).read_text().split()
         if filename != name or checksum != digest(directory / name):
@@ -73,8 +78,7 @@ def publish(directory, tag, repo):
             subprocess.run(["curl", "-fsSL", "--retry", "5", "--retry-all-errors",
                             "--max-time", "180", "-o", online / p.name, url], check=True)
         release_assets(online, tag)
-        subprocess.run(["go", "run", "./scripts/verify-feed", online,
-                        "macos_arm64", "windows_x64", "windows_arm64", "android_arm64"], check=True)
+        subprocess.run(["go", "run", "./scripts/verify-feed", online, *PACKAGES], check=True)
 
 
 if __name__ == "__main__":

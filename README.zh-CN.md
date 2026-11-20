@@ -1,3 +1,5 @@
+<img src="assets/Icon.png" alt="Remote Go 标志" width="96" height="96">
+
 # remote-go
 
 [English](README.md) · **简体中文**
@@ -32,7 +34,7 @@ Argon2id(验证码, salt = "remote-go/tailcat/v1|" + 设备代码, t=3, m=64MiB,
 
 ## 配置 tailcat 中继
 
-桌面端打开 **设置 → 本机引导中继**，选择后点击 **应用**。
+桌面端打开 **设置 → 网络 → 本机引导中继**，选择后点击 **应用**。
 
 - **自动选择**会测速选择公共中继，并记住结果，让设备代码在重启后保持稳定。
 - **公共区域**可选纽约、旧金山、法兰克福或东京。控制端根据设备代码末位找到对应区域。
@@ -47,6 +49,7 @@ Argon2id(验证码, salt = "remote-go/tailcat/v1|" + 设备代码, t=3, m=64MiB,
 ```bash
 sh scripts/build.sh mac       # → bin/build-mac/<版本>/releases/*.dmg
 sh scripts/build.sh windows   # → bin/build-windows/<版本>/releases/*-setup.exe（需要 makensis）
+sh scripts/build.sh linux     # → bin/build-linux/<版本>/releases/*.deb、*.AppImage（amd64 和 arm64）
 ```
 
 打开后不需要登录：
@@ -60,10 +63,24 @@ sh scripts/build.sh windows   # → bin/build-windows/<版本>/releases/*-setup.
 5. 关闭主窗口不会退出，程序会留在菜单栏（Windows 是通知区域）继续允许远程控制，在那里可以重新打开窗口或退出。要真正退出，用托盘菜单的「退出」或 Cmd+Q。
 6. 对方退出或断网后，会话窗口在 6 秒内（收不到心跳就判定）换成「远程会话已断开」页面，说明原因，可以一键重新连接。
 
-界面用 [NSGo](https://github.com/nsgo-dev/nsgo) 绘制：macOS 上是 AppKit 原生视图，Windows 上是 Direct2D，没有 WebView。远程画面是注册给 NSGo 的原生组件（`internal/screen`，`core.Native`）：
+界面用 [NSGo](https://github.com/nsgo-dev/nsgo) 绘制：macOS 上是 AppKit 原生视图，Windows 上是 Direct2D，Linux 上是 GTK 4，没有 WebView。远程画面是注册给 NSGo 的原生组件（`internal/screen`，`core.Native`）：
 
 - **macOS**：`NSView` + `AVSampleBufferDisplayLayer`。Annex-B 转成 AVCC 的 `CMSampleBuffer` 后交给 VideoToolbox 硬件解码，由系统合成器直接显示，不经过 CPU 拷贝。键鼠在视图里直接拿原生事件（物理键码，含左右修饰键、Command 快捷键）。
 - **Windows**：NSGo 窗口里的子 `HWND`。Media Foundation H.264 解码器（MFT）输出 NV12，转成 BGRA 后用 GDI 缩放显示；键盘按扫描码转换，与布局无关。
+- **Linux**：NSGo 窗口里托管的 GTK 4 控件。GStreamer 解码 H.264（有 VA-API 或 NVDEC 时用硬件，否则用 `avdec_h264` 或 OpenH264），画面显示在 `GtkPicture` 中；键盘按 evdev 键码转换，与布局无关。没有可用的 GStreamer H.264 解码器时，控制端改向被控端请求 JPEG。
+
+Linux 作为被控端时，依次尝试 GStreamer 的 `vah264enc`、`vaapih264enc`、`nvh264enc`、`x264enc`、`openh264enc`，用第一个能启动的编码器输出 H.264，都不可用时回退到 JPEG。共享剪贴板通过 X11 的 `CLIPBOARD` 选区同步文本（暂不支持图片和文件）。
+
+- **X11**：用 `ximagesrc` 截屏，键鼠通过 XTEST 注入。
+- **Wayland**：通过 xdg-desktop-portal。被控端开启一个带屏幕共享的 RemoteDesktop 会话（`-view-only` 时只开 ScreenCast），用 `pipewiresrc` 录制 PipeWire 画面流，键鼠按 evdev 键码经门户发送。被控端启动时，桌面会询问共享哪些屏幕、是否允许远程控制，第一次必须有人在电脑前同意。门户的恢复令牌保存在 `~/.config/remote-go/`，之后的会话无需再次确认，直到权限被撤销。安卓键盘输入的文字以 keysym 发送，被控端键盘布局里没有的字符（例如中文）会被跳过。剪贴板只在合成器桥接 XWayland 剪贴板时可用（GNOME、KDE 都会）。JPEG 回退仍使用门户截图，速度较慢。
+
+GTK 4 和 GStreamer 在运行时加载，请用发行版的包管理器安装，例如 Debian / Ubuntu：
+
+```bash
+sudo apt install libgtk-4-1 gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav gstreamer1.0-vaapi gstreamer1.0-pipewire xdg-desktop-portal
+```
+
+发布版本包含 amd64 和 arm64 的 `.deb`：安装到 `/opt/remote-go`，提供 `remote-go` 命令和菜单项，并自动安装必需的 GStreamer 插件；硬件编解码、PipeWire 和门户相关的包作为推荐依赖。用 `sudo apt install ./remote-go-<版本>-linux-x64.deb` 安装。发布版本还为每个架构提供 AppImage：需要 FUSE，且不内置 GTK 4 和 GStreamer，请先用发行版的包管理器安装它们，再 `chmod +x` 后运行。AppImage 用户收到更新时会打开发布页面，需要自行下载新文件。其他发行版可以用 `GOOS=linux CGO_ENABLED=0 go build -o remote-go .` 构建。
 
 会话客户端是 Go 写的（`internal/client`），通过 tailcat 隧道直接拨 WebSocket，不经过本地代理。
 
@@ -88,7 +105,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.apk
+adb install -r bin/build-android/0.5.0/releases/remote-go-0.5.0-android-arm64.apk
 ```
 
 构建 APK 需要 Python 3.9+、JDK 17+、Android SDK（platform 34 或更高）及带 d8 的 Build Tools 36+。可通过 `ANDROID_HOME` 指定 SDK 路径。
@@ -101,14 +118,14 @@ adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.ap
   - 触摸板模式：单指移动光标，轻点是左键，双指轻点是右键，轻点后按住拖动是拖拽。
   - 两种模式都是双指滑动滚动、双指张合缩放（最大 5 倍）。
 - **共享剪贴板**：在会话面板中手动开启。手机复制文字、截图或文件后，回到远程会话即可同步到电脑。手机文件管理器需要将文件放入 Android 系统剪贴板；只在应用内执行的复制操作无法跨应用读取。
-- **键盘**：输入框里打的字以 Unicode 文本发给被控端（新增的 `tx` 消息：macOS 用 `CGEventKeyboardSetUnicodeString`，Windows 用 `KEYEVENTF_UNICODE`），所以中文输入法不受对方键盘布局影响。上方一排是软键盘没有的 Esc、Tab、方向键、Del、Home/End、F5 等；Ctrl / Alt / Shift / ⌘(Win) 点一下会粘住，对下一个键生效，用来按快捷键。
+- **键盘**：输入框里打的字以 Unicode 文本发给被控端（新增的 `tx` 消息：macOS 用 `CGEventKeyboardSetUnicodeString`，Windows 用 `KEYEVENTF_UNICODE`，Linux X11 临时绑定 keysym），所以中文输入法不受对方键盘布局影响。上方一排是软键盘没有的 Esc、Tab、方向键、Del、Home/End、F5 等；Ctrl / Alt / Shift / ⌘(Win) 点一下会粘住，对下一个键生效，用来按快捷键。
 - **网络**：Go 程序在安卓上以普通可执行文件运行，系统不让它读网卡列表。tailcat 引入了 tailscale 的 `androidbin` / `androiddns` 来补上网卡和 DNS。
 - 会话中屏幕保持常亮，系统返回键依次收起键盘、收起工具栏，最后询问是否断开。断线后的处理与桌面版相同，可以一键重连。
 - 不用安卓机也能调试界面：`RG_MOBILE=1 ./remote-go` 在桌面上打开手机尺寸的同一套界面，macOS 的 WKWebView 同样支持 WebCodecs。
 
 ## 在线更新与发布
 
-从 0.3.0 起，桌面「设置」和安卓首页「默认设置」会显示当前版本，并提供「检查更新」。正式安装包默认每天检查一次。发现新版后，macOS 通过 Sparkle 更新应用，Windows 通过 WinSparkle 更新当前用户安装的程序，Android 在验证 APK 后打开系统安装界面。0.2.x 及更早的用户需要手动安装一次含更新器的版本。
+从 0.3.0 起，桌面「设置」和安卓首页「默认设置」会显示当前版本，并提供「检查更新」。正式安装包默认每天检查一次。发现新版后，macOS 通过 Sparkle 更新应用，Windows 通过 WinSparkle 更新当前用户安装的程序，Linux 上用 `.deb` 安装的版本会下载签名的新包，通过 `pkexec dpkg` 安装（需要输入管理员密码）后重启，AppImage 则打开发布页面；Android 在验证 APK 后打开系统安装界面。0.2.x 及更早的用户需要手动安装一次含更新器的版本。
 
 从 0.4.0 起，桌面端可以在远控会话中更新主程序。被控端保留原隧道和验证码，控制端原窗口继续显示画面、接收键鼠输入，进行中的剪贴板传输也会继续。有会话时，新版主界面从菜单栏或通知区域启动，点击 **打开 Remote Go** 即可查看。新开的控制窗口使用新版，等被控连接和会话窗口全部关闭后，被控服务也会切到新版。从主程序托盘选择 **退出 Remote Go** 仍会结束所有会话。
 
@@ -116,9 +133,9 @@ adb install -r bin/build-android/0.4.1/releases/remote-go-0.4.1-android-arm64.ap
 
 每个系统和架构分别从 GitHub Releases 的 Latest 读取 `appcast-<目标>.xml`。清单链接到对应标签下的完整安装包，包使用 Ed25519 签名。
 
-GitHub Actions 会在 PR、推送到 `main` 和手动触发时运行 Go 测试，并构建四个测试安装包。可在 **Build and release** 工作流的运行记录中下载，保留七天。测试 APK 使用临时签名。
+GitHub Actions 会在 PR、推送到 `main` 和手动触发时运行 Go 测试，并构建八个测试安装包。可在 **Build and release** 工作流的运行记录中下载，保留七天。测试 APK 使用临时签名。
 
-发布时先提交 `nsgo.yaml` 的新版本号，再推送对应正式标签，例如 `v0.5.0`。标签工作流通过 Actions Secrets 中的 `NSGO_UPDATES_KEY` 和 `ANDROID_SIGNING_PEM` 沿用现有更新签名和 APK 签名身份。工作流验证签名、核对草稿中的 16 个附件后发布为 **Latest**，并从公开地址重新下载清单和安装包进行校验。发布任务失败后可重跑，以继续上传草稿或重新校验已发布版本。
+发布时先提交 `nsgo.yaml` 的新版本号，再推送对应正式标签，例如 `v0.5.0`。标签工作流通过 Actions Secrets 中的 `NSGO_UPDATES_KEY` 和 `ANDROID_SIGNING_PEM` 沿用现有更新签名和 APK 签名身份。工作流验证签名、核对草稿中的 28 个附件后发布为 **Latest**，并从公开地址重新下载清单和安装包进行校验。发布任务失败后可重跑，以继续上传草稿或重新校验已发布版本。
 
 也可在安装了 Go、Xcode 命令行工具、NSIS 和上述 Android 工具的 macOS 上运行 `sh scripts/build.sh release`。本地构建读取 `NSGO_UPDATES_KEY` 或 `~/.config/remote-go/updates.key` 的更新私钥，以及 `.nsgo/android/debug.pem` 的 APK 签名身份。两份私钥均应独立备份。
 

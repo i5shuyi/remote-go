@@ -12,6 +12,7 @@ import (
 
 	"github.com/i5shuyi/remote-go/internal/backend"
 	"github.com/i5shuyi/remote-go/internal/client"
+	"github.com/i5shuyi/remote-go/internal/encoder"
 	"github.com/i5shuyi/remote-go/internal/screen"
 )
 
@@ -86,7 +87,7 @@ func (g *gui) devSession() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		var d net.Dialer
-		s, err := client.Dial(ctx, d.DialContext, addr, code, true, cfg, h)
+		s, err := client.Dial(ctx, d.DialContext, addr, code, encoder.CanDecodeH264(), cfg, h)
 		if err != nil {
 			return nil, err
 		}

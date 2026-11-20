@@ -1,4 +1,4 @@
-//go:build !darwin && !(windows && (amd64 || arm64))
+//go:build !darwin && !(windows && (amd64 || arm64)) && !(linux && !android)
 
 package screen
 

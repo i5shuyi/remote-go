@@ -28,6 +28,7 @@ import (
 	"tailscale.com/tailcfg"
 
 	"github.com/i5shuyi/remote-go/internal/client"
+	"github.com/i5shuyi/remote-go/internal/encoder"
 	"github.com/i5shuyi/remote-go/internal/host"
 	"github.com/i5shuyi/remote-go/internal/tunnel"
 )
@@ -442,34 +443,42 @@ func (a *App) State() StateDTO {
 
 // RefreshPassword generates a new random verification code.
 func (a *App) RefreshPassword() string {
-	a.mu.Lock()
-	a.cfg.FixedPassword = ""
-	a.password = randomPassword()
-	a.saveConfig()
-	p := a.password
-	a.mu.Unlock()
-	a.emit()
-	a.restartHost()
+	p, err := a.replacePassword("")
+	if err != nil {
+		log.Printf("refresh verification code: %v", err)
+	}
 	return p
 }
 
 // SetFixedPassword sets a permanent verification code ("" = random again).
 func (a *App) SetFixedPassword(p string) error {
 	p = strings.TrimSpace(p)
-	if p == "" {
-		a.RefreshPassword()
-		return nil
-	}
-	if len(p) < 8 {
+	if p != "" && len(p) < 8 {
 		return errors.New("固定验证码至少 8 位（它同时是隧道密钥的来源，越长越安全）")
 	}
+	_, err := a.replacePassword(p)
+	return err
+}
+
+func (a *App) replacePassword(fixed string) (string, error) {
 	a.mu.Lock()
-	a.cfg.FixedPassword, a.password = p, p
-	err := a.saveConfig()
+	old := a.cfg.FixedPassword
+	a.cfg.FixedPassword = fixed
+	if err := a.saveConfig(); err != nil {
+		a.cfg.FixedPassword = old
+		current := a.password
+		a.mu.Unlock()
+		return current, err
+	}
+	current := fixed
+	if current == "" {
+		current = randomPassword()
+	}
+	a.password = current
 	a.mu.Unlock()
 	a.emit()
 	a.restartHost()
-	return err
+	return current, nil
 }
 
 func (a *App) SetAllowControl(on bool) error {
@@ -589,7 +598,7 @@ func Dial(ctx context.Context, code, password, endpoint string, cfg client.Confi
 			onClose(err)
 		}
 	}
-	s, err := client.Dial(ctx, tc.DialContext, fmt.Sprintf("remote-go:%d", tunnel.Port), password, true, cfg, h)
+	s, err := client.Dial(ctx, tc.DialContext, fmt.Sprintf("remote-go:%d", tunnel.Port), password, encoder.CanDecodeH264(), cfg, h)
 	if err != nil {
 		tc.Close()
 		return nil, err

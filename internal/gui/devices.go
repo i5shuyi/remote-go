@@ -9,6 +9,7 @@ import (
 	"github.com/nsgo-dev/nsgo/icons/lucide"
 	"github.com/nsgo-dev/nsgo/ui"
 
+	"github.com/i5shuyi/remote-go/assets"
 	"github.com/i5shuyi/remote-go/internal/backend"
 	"github.com/i5shuyi/remote-go/internal/client"
 	"github.com/i5shuyi/remote-go/internal/members"
@@ -95,10 +96,10 @@ func (g *gui) devices(cx *core.Scope) core.Node {
 	return core.View{Class: "gap-4 max-w-[960px]", Children: []core.Node{
 		pageHeader("我的设备",
 			ui.IconButton{Icon: lucide.RefreshCw, Label: "立即同步", Disabled: notReady, OnPress: func() { go g.be.SyncMembers() }},
-			ui.Button{Text: "添加设备", Icon: lucide.Plus, Color: brandBlue, Disabled: notReady, OnPress: func() { pairOpen.Set(true) }},
+			ui.Button{Text: "添加设备", Icon: lucide.Plus, Color: assets.Accent, Disabled: notReady, OnPress: func() { pairOpen.Set(true) }},
 		),
 		core.Show{When: notReady, Then: func(cx *core.Scope) core.Node {
-			return card(textf("text-sm text-muted-foreground", func() string {
+			return section(textf("text-sm text-muted-foreground", func() string {
 				if e := g.mem().Error; e != "" {
 					return "我的设备不可用：" + e
 				}
@@ -128,17 +129,14 @@ func (g *gui) devices(cx *core.Scope) core.Node {
 			}}
 		}},
 		core.Show{When: func() bool { m := g.mem(); return m.Ready && !m.InGroup && !m.Conflict }, Then: func(cx *core.Scope) core.Node {
-			return card(
-				text("text-lg font-semibold", "免码连接自己的设备"),
-				text("text-sm text-muted-foreground", "先用设备代码和验证码连上自己的另一台设备，确认两边显示的配对码一致后，以后就能直接从这里连接，无需再输入任何代码。"),
-				core.View{Class: "flex-row", Children: []core.Node{
-					ui.Button{Text: "添加第一台设备", Icon: lucide.UserPlus, Color: brandBlue, OnPress: func() { pairOpen.Set(true) }},
-				}},
+			return section(
+				text("text-base font-semibold", "尚未配对设备"),
+				text("text-sm text-muted-foreground", "点击「添加设备」，输入另一台设备的代码和验证码。在两端确认配对码后，即可从这里直接连接。"),
 			)
 		}},
 		core.Show{When: func() bool { return g.mem().InGroup }, Then: func(cx *core.Scope) core.Node {
 			return core.View{Class: "gap-4", Children: []core.Node{
-				card(
+				section(
 					core.View{Class: "flex-row items-center gap-2", Children: []core.Node{
 						text("flex-1 text-lg font-semibold", "设备"),
 						textf("text-xs text-muted-foreground", func() string { return "组指纹 " + g.mem().Group }),
@@ -181,7 +179,7 @@ func (g *gui) devices(cx *core.Scope) core.Node {
 							}}
 						}),
 				),
-				card(text("text-lg font-semibold", "本机访问"),
+				section(text("text-lg font-semibold", "本机访问"),
 					row("允许我的设备直连", func() string {
 						switch m := g.mem(); {
 						case !g.st.Get().AllowControl:
@@ -293,7 +291,7 @@ func (g *gui) pairDialog(cx *core.Scope, open *core.Signal[bool]) core.Node {
 		},
 		Footer: []core.Node{
 			ui.Button{Text: "取消", Variant: ui.ButtonOutline, OnPress: closeIt},
-			ui.Button{Text: "连接并配对", Color: brandBlue, OnPress: submit},
+			assets.ConnectButton{Text: "连接并配对", OnPress: submit},
 		},
 	}
 }
@@ -360,13 +358,13 @@ func (g *gui) promptDialog(cx *core.Scope) core.Node {
 			core.Show{When: func() bool { return current().Kind == "control" || current().Kind == "change" }, Then: func(cx *core.Scope) core.Node {
 				return core.View{Class: "flex-row gap-2", Children: []core.Node{
 					ui.Button{Text: "拒绝", Variant: ui.ButtonOutline, OnPress: func() { answer(false) }},
-					ui.Button{Text: "允许", Color: brandBlue, OnPress: func() { answer(true) }},
+					ui.Button{Text: "允许", Color: assets.Accent, OnPress: func() { answer(true) }},
 				}}
 			}},
 			core.Show{When: func() bool { return current().Kind == "pair" }, Then: func(cx *core.Scope) core.Node {
 				return core.View{Class: "flex-row gap-2", Children: []core.Node{
 					ui.Button{Text: "不一致，取消", Variant: ui.ButtonOutline, OnPress: func() { answer(false) }},
-					ui.Button{Text: "一致，确认", Color: brandBlue, OnPress: func() { answer(true) }},
+					ui.Button{Text: "一致，确认", Color: assets.Accent, OnPress: func() { answer(true) }},
 				}}
 			}},
 		},

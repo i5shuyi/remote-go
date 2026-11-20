@@ -29,6 +29,7 @@ import (
 	"golang.org/x/image/draw"
 
 	"github.com/i5shuyi/remote-go/internal/clipshare"
+	"github.com/i5shuyi/remote-go/internal/display"
 	"github.com/i5shuyi/remote-go/internal/encoder"
 	"github.com/i5shuyi/remote-go/internal/input"
 	"github.com/i5shuyi/remote-go/internal/webui"
@@ -101,6 +102,7 @@ func New(cfg Config) (*Server, error) {
 		cfg.Code = RandomCode()
 	}
 	s := &Server{cfg: cfg, capture: captureRect, sessions: map[int]*liveSession{}}
+	display.Prepare(!cfg.ViewOnly)
 	if !cfg.ViewOnly {
 		inj, err := input.New()
 		if err != nil {
@@ -111,7 +113,7 @@ func New(cfg Config) (*Server, error) {
 			s.clipboard = clipshare.System()
 		}
 	}
-	if n := screenshot.NumActiveDisplays(); cfg.Display >= n {
+	if n := display.Count(); n >= 0 && cfg.Display >= n {
 		return nil, fmt.Errorf("显示器编号 %d 不存在（共 %d 个）", cfg.Display, n)
 	}
 	return s, nil
@@ -385,7 +387,14 @@ func (s *Server) acceptWS(w http.ResponseWriter, r *http.Request, info SessionIn
 		s.changed()
 	}()
 
-	sess := &session{s: s, c: c, bounds: screenshot.GetDisplayBounds(s.cfg.Display), viewOnly: info.ViewOnly,
+	bounds, err := display.Bounds(ctx, s.cfg.Display)
+	if err != nil {
+		msg, _ := json.Marshal(map[string]string{"t": "error", "msg": "无法共享屏幕：" + err.Error()})
+		c.Write(ctx, websocket.MessageText, msg)
+		c.Close(websocket.StatusInternalError, "screen unavailable")
+		return
+	}
+	sess := &session{s: s, c: c, bounds: bounds, viewOnly: info.ViewOnly,
 		wantH264: r.URL.Query().Get("codec") == "h264",
 		reconf:   make(chan struct{}, 1), kf: make(chan struct{}, 1)}
 	sess.quality.Store(70)

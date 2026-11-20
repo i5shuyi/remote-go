@@ -1,6 +1,6 @@
 name: Remote Go
 id: dev.remotego.app
-version: 0.4.1
+version: 0.5.0
 
 release:
   github: i5shuyi/remote-go
@@ -11,3 +11,13 @@ updates:
 apple:
   info:
     NSAppleEventsUsageDescription: Remote Go 需要控制键盘鼠标以响应远程操作。
+linux:
+  categories: [Network, RemoteAccess]
+  depends:
+    # appsrc/appsink/videoconvert, ximagesrc and h264parse.
+    deb: [gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad]
+    arch: [gst-plugins-base, gst-plugins-good, gst-plugins-bad]
+  recommends:
+    # H.264 decoders and encoders, and Wayland screen sharing.
+    deb: [gstreamer1.0-libav, gstreamer1.0-plugins-ugly, gstreamer1.0-vaapi, gstreamer1.0-pipewire, xdg-desktop-portal]
+    arch: [gst-libav, gst-plugins-ugly, gst-plugin-pipewire, xdg-desktop-portal]

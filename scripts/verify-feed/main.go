@@ -45,7 +45,7 @@ func verify(dir, target string, cfg config, key ed25519.PublicKey) error {
 	}
 	e := rss.Entries[0]
 	osName, _, _ := strings.Cut(target, "_")
-	suffix := map[string]string{"macos": ".dmg", "windows": "-setup.exe", "android": ".apk"}[osName]
+	suffix := map[string]string{"macos": ".dmg", "windows": "-setup.exe", "linux": ".deb", "android": ".apk"}[osName]
 	name := fmt.Sprintf("remote-go-%s-%s%s", cfg.Version, strings.ReplaceAll(target, "_", "-"), suffix)
 	url := fmt.Sprintf("https://github.com/%s/releases/download/v%s/%s", cfg.Release.GitHub, cfg.Version, name)
 	if suffix == "" || e.URL != url || e.Version != cfg.Version {

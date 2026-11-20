@@ -217,15 +217,15 @@ func (a *app) devicesCard(cx *core.Scope, code, pw func() string) core.Node {
 		return out
 	}
 	return core.View{Class: "gap-2", Children: []core.Node{
-		core.View{Class: "flex-row items-center px-1", Children: []core.Node{
-			text("flex-1 text-sm text-muted-foreground", "我的设备"),
+		core.View{Class: "flex-row items-center", Children: []core.Node{
+			text("flex-1 text-base font-semibold", "我的设备"),
 			core.Show{When: func() bool { return a.mem.Get().InGroup }, Then: func(*core.Scope) core.Node {
 				return ui.IconButton{Icon: lucide.RefreshCw, Label: "同步", OnPress: a.syncMembers}
 			}},
 		}},
-		core.View{Class: "rounded-2xl bg-card border border-border overflow-hidden", Children: []core.Node{
+		core.View{Class: "border-t border-border overflow-hidden", Children: []core.Node{
 			core.Show{When: func() bool { return a.mem.Get().Conflict }, Then: func(*core.Scope) core.Node {
-				return core.View{Class: "px-4 py-3 gap-2 border-b border-border", Children: []core.Node{
+				return core.View{Class: "py-3 gap-2 border-b border-border", Children: []core.Node{
 					text("text-sm text-red-500", "设备组出现互相矛盾的修改，已暂停免码连接。请在电脑上重建设备组后重新添加本机。"),
 					ui.Button{Text: "在本机停用旧设备组", Variant: ui.ButtonOutline, OnPress: func() {
 						if err := a.node.Forget(); err != nil {
@@ -242,7 +242,7 @@ func (a *app) devicesCard(cx *core.Scope, code, pw func() string) core.Node {
 							a.toast(err)
 						}
 					})
-				}, Class: "flex-row items-center gap-3 px-4 py-3 border-b border-border", Children: []core.Node{
+				}, Class: "flex-row items-center gap-3 py-3 border-b border-border", Children: []core.Node{
 					icon(lucide.Laptop, "w-[22px] h-[22px] text-muted-foreground"),
 					core.View{Class: "flex-1 gap-0.5", Children: []core.Node{
 						textf("text-base font-medium", func() string { return m().Name }),
@@ -263,7 +263,7 @@ func (a *app) devicesCard(cx *core.Scope, code, pw func() string) core.Node {
 					}},
 				}}
 			}),
-			core.View{Class: "px-4 py-3 gap-2", Children: []core.Node{
+			core.View{Class: "py-3 gap-2", Children: []core.Node{
 				textf("text-xs text-muted-foreground", func() string {
 					switch {
 					case a.pairing.Get() != "":
@@ -271,7 +271,7 @@ func (a *app) devicesCard(cx *core.Scope, code, pw func() string) core.Node {
 					case a.node == nil:
 						return "我的设备不可用"
 					case !a.mem.Get().InGroup:
-						return "在上方填好自己电脑的设备代码和验证码，点「添加到我的设备」，核对配对码后以后即可免码连接。"
+						return "填写上方的设备代码和验证码，然后添加设备。配对后可直接连接。"
 					}
 					return "添加其他电脑：填好它的设备代码和验证码后点下方按钮。"
 				}),

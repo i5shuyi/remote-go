@@ -11,7 +11,8 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = {"mac": ["macos_arm64"], "windows": ["windows_x64", "windows_arm64"],
-           "android": ["android_arm64"]}
+           "linux": ["linux_x64", "linux_arm64"], "android": ["android_arm64"]}
+
 # The certificate used by the APKs already distributed to Android users.
 APK_CERT = "c71035aa07415dcfb3c145b9fc946a2a00fd250c300708997a4ba357536e0878"
 
@@ -60,11 +61,14 @@ def android_runtime(packager, tmp):
 
 def verify_output(directory, target, version, signed, dex):
     releases = directory / "releases"
-    extension = {"macos": ".dmg", "windows": "-setup.exe", "android": ".apk"}[target.split("_")[0]]
+    extension = {"macos": ".dmg", "windows": "-setup.exe", "linux": ".deb",
+                 "android": ".apk"}[target.split("_")[0]]
     name = f"remote-go-{version}-{target.replace('_', '-')}{extension}"
     package = releases / name
     if not package.is_file():
         raise SystemExit(f"Missing installer: {name}")
+    if target.startswith("linux_") and not (releases / name.replace(".deb", ".AppImage")).is_file():
+        raise SystemExit(f"Missing AppImage for {target}")
     if target == "android_arm64":
         with zipfile.ZipFile(package) as apk:
             if apk.read("classes.dex") != dex.read_bytes():
@@ -120,6 +124,9 @@ def main():
         run(tool, "build", "-target", ",".join(targets), "-output", stage, ".", env=env)
         for target in targets:
             verify_output(stage, target, version, signed, dex)
+        # Linux ships as .deb (which the update feeds point at) and AppImage.
+        for extra in stage.glob("releases/*.pkg.tar.gz*"):
+            extra.unlink()
         if signed:
             run("go", "run", "./scripts/verify-feed", stage / "releases", *targets)
         # Expose the complete set only after every selected target passes verification.
