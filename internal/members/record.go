@@ -200,7 +200,8 @@ type Profile struct {
 	Relays   []Relay `json:"relays"`
 }
 
-// Ack states what a member has durably stored.
+// Ack states what a member has durably stored. A zero KeyVersion means
+// the member has the signed history but needs the current key delivered.
 type Ack struct {
 	V          int `json:"v"`
 	Group      ID  `json:"group"`

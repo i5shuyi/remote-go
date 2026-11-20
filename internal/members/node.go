@@ -1,6 +1,7 @@
 package members
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
@@ -30,14 +31,15 @@ type Node struct {
 	keys  KeyStore
 	now   func() time.Time
 
-	f      *File
-	g      *Group // nil when not in a group
-	self   Identity
-	k      map[ID][]byte // held group keys by version
-	broken error         // state could not be verified: inbound closed
-	keyErr error         // a referenced key slot is missing or wrong
-	gen    uint64        // bumped by every authorization change
-	sess   map[*session]struct{}
+	f         *File
+	g         *Group // nil when not in a group
+	self      Identity
+	k         map[ID][]byte // held group keys by version
+	broken    error         // state could not be verified: inbound closed
+	keyErr    error         // a referenced key slot is missing or wrong
+	gen       uint64        // bumped by every authorization change
+	sess      map[*session]struct{}
+	departing bool // allow sync-only dialing until a local Leave is announced
 
 	// Approve asks the person at this desktop to allow a control request.
 	// Nil means no local confirmation UI: control needing approval fails.
@@ -47,10 +49,11 @@ type Node struct {
 }
 
 type session struct {
-	member  ID
-	purpose string
-	inbound bool
-	cancel  func()
+	member   ID
+	purpose  string
+	inbound  bool
+	cancel   func()
+	endpoint *Endpoint // receiving address of a member control request
 }
 
 // OpenNode loads the state owned by store. A state that fails validation
@@ -198,7 +201,7 @@ func (n *Node) cleanupLocked() {
 // enforceLocked cancels every session the current state no longer allows.
 func (n *Node) enforceLocked() {
 	for s := range n.sess {
-		if n.authorizedLocked(s.member, s.purpose, s.inbound) != nil {
+		if n.checkSessionLocked(s) != nil {
 			s.cancel()
 			delete(n.sess, s)
 		}
@@ -256,12 +259,29 @@ func (n *Node) Authorize(pub ed25519.PublicKey, purpose string, inbound bool) (I
 // happen under one lock, so a removal committed before cannot be missed and
 // one committed after cancels it.
 func (n *Node) Register(member ID, purpose string, inbound bool, cancel func()) (release func(), err error) {
+	return n.register(&session{member: member, purpose: purpose, inbound: inbound, cancel: cancel})
+}
+
+func (n *Node) checkSessionLocked(s *session) error {
+	if err := n.authorizedLocked(s.member, s.purpose, s.inbound); err != nil {
+		return err
+	}
+	if ep := s.endpoint; ep != nil {
+		p, ok := n.g.Profile(n.self.ID())
+		v := n.g.State().KeyVersion
+		if !ok || !p.Inbound || len(p.Relays) == 0 || p.Relays[0] != ep.Relay || n.f.KeyCurrent != v || !bytes.Equal(ep.KeyVersion, v[:]) {
+			return errors.New("此地址仅供同步，请使用当前地址连接")
+		}
+	}
+	return nil
+}
+
+func (n *Node) register(s *session) (func(), error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if err := n.authorizedLocked(member, purpose, inbound); err != nil {
+	if err := n.checkSessionLocked(s); err != nil {
 		return nil, err
 	}
-	s := &session{member, purpose, inbound, cancel}
 	n.sess[s] = struct{}{}
 	return func() {
 		n.mu.Lock()
@@ -399,7 +419,11 @@ func (n *Node) Leave() (Signed, error) {
 	if err != nil {
 		return Signed{}, err
 	}
-	return r, n.commitLocked(nil)
+	if err := n.commitLocked(nil); err != nil {
+		return Signed{}, err
+	}
+	n.departing = true
+	return r, nil
 }
 
 // Forget stops using the group locally and deletes its identity and keys:
@@ -412,6 +436,7 @@ func (n *Node) Forget() error {
 	}
 	n.g, n.self, n.k, n.keyErr, n.broken = nil, Identity{}, map[ID][]byte{}, nil, nil
 	n.f.Self, n.f.KeyCurrent, n.f.KeyPrev, n.f.PrevUntil, n.f.MigrateUntil = ID{}, ID{}, ID{}, time.Time{}, time.Time{}
+	n.departing = false
 	n.f.Pairings, n.f.Policy = nil, Policy{}
 	return n.commitLocked(nil)
 }
@@ -532,7 +557,7 @@ type Endpoint struct {
 }
 
 func (n *Node) endpointsLocked(member ID) []Endpoint {
-	if n.usableLocked() != nil || n.keyErr != nil {
+	if n.broken != nil || n.keyErr != nil || !n.g.State().Active(member) {
 		return nil
 	}
 	p, ok := n.g.Profile(member)
@@ -549,7 +574,7 @@ func (n *Node) endpointsLocked(member ID) []Endpoint {
 			gid, ver, mid := n.g.ID(), v, member
 			out = append(out, Endpoint{
 				MemberEndpoint: tunnel.MemberEndpoint{GroupKey: k, GroupID: gid[:], KeyVersion: ver[:], MemberID: mid[:], Relay: r},
-				Control:        v == n.f.KeyCurrent && i == 0,
+				Control:        !n.departing && v == n.g.State().KeyVersion && i == 0,
 			})
 		}
 	}
@@ -570,7 +595,7 @@ func (n *Node) ListenEndpoints() []Endpoint {
 func (n *Node) DialEndpoints(member ID) []Endpoint {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.g == nil || member == n.self.ID() {
+	if n.g == nil || member == n.self.ID() || (!n.departing && n.usableLocked() != nil) {
 		return nil
 	}
 	return n.endpointsLocked(member)

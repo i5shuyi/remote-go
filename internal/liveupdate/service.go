@@ -64,14 +64,15 @@ type Reply struct {
 	Error    string
 }
 type service struct {
-	be          *backend.App
-	mu          sync.Mutex
-	windows     int
-	stopping    bool
-	lastContact time.Time
-	lastUI      atomic.Int64 // UnixNano of the last main-window poll
-	stop        context.CancelFunc
-	ctx         context.Context
+	pendingChanges int // protected by mu
+	be             *backend.App
+	mu             sync.Mutex
+	windows        int
+	stopping       bool
+	lastContact    time.Time
+	lastUI         atomic.Int64 // UnixNano of the last main-window poll
+	stop           context.CancelFunc
+	ctx            context.Context
 }
 
 func Serve(parent context.Context) error {
@@ -125,7 +126,7 @@ func (s *service) reapWhenAbandoned() {
 	}
 }
 func (s *service) retire() bool {
-	if s.windows != 0 || !s.be.DrainIfIdle() {
+	if s.windows != 0 || s.pendingChanges != 0 || !s.be.DrainIfIdle() {
 		return false
 	}
 	s.stopping = true
@@ -179,14 +180,6 @@ func (s *service) dispatch(q Request) (r Reply) {
 		if q.Answer != nil {
 			err = s.be.AnswerPrompt(q.Answer.ID, q.Answer.OK, q.Answer.Inbound)
 		}
-	case "member-policy":
-		if q.Policy != nil {
-			err = s.be.SetMemberPolicy(*q.Policy)
-		}
-	case "member-remove":
-		err = s.be.RemoveMember(q.Text, q.On)
-	case "member-rotate":
-		err = s.be.RotateMemberKey()
 	case "member-proxy": // a session window reconnecting
 		s.mu.Unlock()
 		var p Proxy
@@ -197,15 +190,26 @@ func (s *service) dispatch(q Request) (r Reply) {
 		}
 	case "member-sync":
 		s.be.SyncMembers()
-	case "member-leave", "member-rebuild":
-		op := q.Op
-		s.mu.Unlock() // leaving syncs with peers first
-		if op == "member-leave" {
+	case "member-policy", "member-remove", "member-rotate", "member-leave", "member-rebuild":
+		// The window must be able to poll and answer while the operation waits.
+		s.pendingChanges++
+		s.mu.Unlock()
+		switch q.Op {
+		case "member-policy":
+			if q.Policy != nil {
+				err = s.be.SetMemberPolicy(*q.Policy)
+			}
+		case "member-remove":
+			err = s.be.RemoveMember(q.Text, q.On)
+		case "member-rotate":
+			err = s.be.RotateMemberKey()
+		case "member-leave":
 			err = s.be.LeaveMembers()
-		} else {
+		case "member-rebuild":
 			err = s.be.RebuildMembers()
 		}
 		s.mu.Lock()
+		s.pendingChanges--
 	case "open":
 		state := s.be.State()
 		w := q.Window
@@ -316,6 +320,9 @@ func exchange(q Request) (r Reply, err error) {
 	timeout := 60 * time.Second
 	if q.Op == "open" && q.Window.Member != "" || q.Op == "member-proxy" {
 		timeout = members.ApproveTimeout + 80*time.Second
+	}
+	if q.Op == "member-leave" {
+		timeout = members.ApproveTimeout + 35*time.Second
 	}
 	if q.Op == "state" {
 		timeout = 3 * time.Second

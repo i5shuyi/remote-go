@@ -226,11 +226,12 @@ func (n *Node) pair(ctx context.Context, raw net.Conn, dialer bool, token []byte
 		role = "joiner"
 	}
 	inviterPub, joinerPub := me.Public(), peerPub
-	if role == "joiner" {
+	localFirst := role == "inviter" || role == "recover" && dialer
+	if !localFirst {
 		inviterPub, joinerPub = peerPub, me.Public()
 	}
 	dir := "joiner-dials"
-	if (role == "inviter") == dialer {
+	if localFirst == dialer {
 		dir = "inviter-dials"
 	}
 	group := myGroup
@@ -259,7 +260,7 @@ func (n *Node) pair(ctx context.Context, raw net.Conn, dialer bool, token []byte
 	// The person compares codes on both screens; give them time, and end
 	// the local prompt as soon as the other side cancels, drops or times out.
 	deadline(raw, PairConfirmTime)
-	cctx, ccancel := context.WithCancel(ctx)
+	cctx, ccancel := context.WithTimeout(ctx, PairConfirmTime)
 	defer ccancel()
 	peerc := make(chan pairConfirm, 1)
 	perr := make(chan error, 1)
@@ -302,7 +303,15 @@ func (n *Node) pair(ctx context.Context, raw net.Conn, dialer bool, token []byte
 
 	switch role {
 	case "recover":
-		_, err := n.sync(fr, MemberID(peerPub))
+		peer, err := n.Authorize(peerPub, PurposeSync, false)
+		if err != nil {
+			return err
+		}
+		if _, err := n.sync(fr, peer); err != nil {
+			return err
+		}
+		// A conflict-only history exchange cannot complete recovery.
+		_, err = n.Authorize(peerPub, PurposeControl, false)
 		return err
 	case "inviter":
 		return n.invite(fr, me, MemberID(peerPub), conf.Txn, opts)

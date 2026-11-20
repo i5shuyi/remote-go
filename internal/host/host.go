@@ -92,6 +92,7 @@ type Server struct {
 	sessions    map[int]*liveSession
 	// inputPaused is the local input barrier raised while a security
 	// prompt is on screen: remote input is dropped, not queued.
+	inputMu     sync.Mutex
 	inputPaused atomic.Bool
 }
 
@@ -195,6 +196,8 @@ func (s *Server) InputPaused() bool { return s.inputPaused.Load() }
 // key and button remote sessions hold; events arriving meanwhile are
 // discarded so none can answer a local prompt.
 func (s *Server) PauseInput(on bool) {
+	s.inputMu.Lock()
+	defer s.inputMu.Unlock()
 	s.inputPaused.Store(on)
 	if on && s.inj != nil {
 		s.inj.ReleaseAll()
@@ -252,13 +255,14 @@ type MemberPeer struct {
 // has already authenticated and approved. It returns when the session
 // ends or ctx is cancelled (revocation).
 func (s *Server) ServeMember(ctx context.Context, conn net.Conn, peer MemberPeer) {
+	ln := &oneConn{c: conn, done: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/info", s.handleInfo)
 	mux.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
+		defer ln.Close() // a hijacked WebSocket never transitions to http.StateClosed
 		r = r.WithContext(ctx)
 		s.acceptWS(w, r, SessionInfo{Node: peer.Name, Login: "我的设备", Member: peer.ID, ViewOnly: peer.ViewOnly})
 	})
-	ln := &oneConn{c: conn, done: make(chan struct{})}
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second,
 		ConnState: func(_ net.Conn, st http.ConnState) {
 			if st == http.StateClosed {
@@ -497,6 +501,8 @@ func (ss *session) handle(ctx context.Context, m inMsg) {
 		ss.sendJSON(context.Background(), map[string]any{"t": "pong", "ts": m.TS})
 		return
 	}
+	ss.s.inputMu.Lock()
+	defer ss.s.inputMu.Unlock()
 	inj := ss.s.inj
 	if !ss.canInput() || ss.s.inputPaused.Load() {
 		return

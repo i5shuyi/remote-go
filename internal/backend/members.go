@@ -1,6 +1,7 @@
 package backend
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -17,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -65,12 +67,13 @@ type DeviceDTO struct {
 // worker has paused remote input before it appears.
 type PromptDTO struct {
 	ID         int    `json:"id"`
-	Kind       string `json:"kind"` // "pair" | "control"
+	Kind       string `json:"kind"` // "pair" | "control" | "change"
 	Code       string `json:"code,omitempty"`
 	Peer       string `json:"peer"`
 	PeerShort  string `json:"peerShort"`
 	Role       string `json:"role,omitempty"` // pairing: inviter | joiner | recover
 	NewGroup   bool   `json:"newGroup,omitempty"`
+	Detail     string `json:"detail,omitempty"`
 	CanInbound bool   `json:"canInbound,omitempty"` // offer "允许我的设备直连"
 }
 
@@ -82,11 +85,13 @@ type PairingDTO struct {
 }
 
 type memberSide struct {
+	changeMu sync.Mutex
 	node     *members.Node
 	store    *members.Store
 	err      string
 	tokens   members.TokenBook
-	lns      map[string]*memberListener
+	lns      memberListeners // guarded by memMu
+	serving  bool            // guarded by mu
 	pairLn   net.Listener
 	pairStop context.CancelFunc
 	prompts  map[int]*prompt
@@ -232,85 +237,99 @@ func (a *App) reconcileMembers() {
 		if err := n.SetProfile(name, runtime.GOOS, n.Policy().AllowInbound, relay); err != nil {
 			log.Printf("更新本机自述失败：%v", err)
 		}
-		n.Maintain()
 	}
-	want := map[string]members.Endpoint{}
+	n.Maintain()
+	var endpoints []members.Endpoint
 	if on {
-		for _, ep := range n.ListenEndpoints() {
-			if addr, err := ep.Addr(); err == nil {
-				want[string(addr)] = ep
-			}
-		}
+		endpoints = n.ListenEndpoints()
 	}
-	a.mu.Lock()
 	if a.mem.lns == nil {
-		a.mem.lns = map[string]*memberListener{}
+		a.mem.lns = memberListeners{}
 	}
-	var stop []*memberListener
-	for k, l := range a.mem.lns {
-		if _, ok := want[k]; !ok {
-			stop = append(stop, l)
-			delete(a.mem.lns, k)
-		}
-	}
-	var start []string
-	for k := range want {
-		if _, ok := a.mem.lns[k]; !ok {
-			start = append(start, k)
-		}
-	}
-	a.mu.Unlock()
-	for _, l := range stop {
-		l.srv.Close()
-		l.ln.Close()
-	}
-	for _, k := range start {
-		ep := want[k]
-		l, err := a.startMemberListener(n, ep)
-		if err != nil {
-			log.Printf("成员监听启动失败：%v", err)
-			continue
-		}
-		a.mu.Lock()
-		a.mem.lns[k] = l
-		a.mu.Unlock()
-	}
-	if len(stop)+len(start) > 0 {
-		a.emit()
-	}
+	a.mem.lns.reconcile(a.ctx, n, endpoints, a.serveMemberControl, a.logf())
+	a.setMembersServing(len(a.mem.lns) > 0)
 }
 
-func (a *App) startMemberListener(n *members.Node, ep members.Endpoint) (*memberListener, error) {
+// EndpointHandler rechecks the address under the node's authorization lock,
+// so a listener can stay up for sync when its key or relay stops being preferred.
+type memberListeners map[string]*memberListener
+
+func (ls memberListeners) reconcile(ctx context.Context, n *members.Node, endpoints []members.Endpoint, control members.ControlHandler, logf func(string, ...any)) error {
+	want := make(map[string]members.Endpoint, len(endpoints))
+	for _, ep := range endpoints {
+		addr, err := ep.Addr()
+		if err != nil {
+			return err
+		}
+		want[string(addr)] = ep
+	}
+	for addr, l := range ls {
+		if _, ok := want[addr]; !ok {
+			l.close()
+			delete(ls, addr)
+		}
+	}
+	var firstErr error
+	for addr, ep := range want {
+		if ls[addr] != nil {
+			continue
+		}
+		l, err := startMemberListener(ctx, n, ep, control, logf)
+		if err != nil {
+			log.Printf("成员监听启动失败：%v", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		ls[addr] = l
+	}
+	return firstErr
+}
+
+func startMemberListener(parent context.Context, n *members.Node, ep members.Endpoint, control members.ControlHandler, logf func(string, ...any)) (*memberListener, error) {
 	cfg, err := n.ServerTLS()
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	ln, err := tunnel.ListenMember(ctx, ep.MemberEndpoint, a.logf())
+	ln, err := tunnel.ListenMember(ctx, ep.MemberEndpoint, logf)
 	if err != nil {
 		return nil, err
 	}
-	var control members.ControlHandler
-	if ep.Control { // older generations and relays serve sync and catch-up only
-		control = a.serveMemberControl
-	}
-	srv := &http.Server{Handler: n.Handler(control), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: n.EndpointHandler(ep, control), ReadHeaderTimeout: 10 * time.Second}
 	go srv.Serve(tls.NewListener(ln, cfg))
 	return &memberListener{ln: ln, srv: srv}, nil
+}
+
+func (l *memberListener) close() {
+	l.srv.Close()
+	l.ln.Close()
+}
+
+func (ls memberListeners) close() {
+	for addr, l := range ls {
+		l.close()
+		delete(ls, addr)
+	}
+}
+
+func (a *App) setMembersServing(serving bool) {
+	a.mu.Lock()
+	changed := a.mem.serving != serving
+	a.mem.serving = serving
+	a.mu.Unlock()
+	if changed {
+		a.emit()
+	}
 }
 
 func (a *App) stopMemberListeners() {
 	a.memMu.Lock()
 	defer a.memMu.Unlock()
-	a.mu.Lock()
-	lns := a.mem.lns
-	a.mem.lns = nil
-	a.mu.Unlock()
-	for _, l := range lns {
-		l.srv.Close()
-		l.ln.Close()
-	}
+	a.mem.lns.close()
+	a.setMembersServing(false)
 }
 
 func (a *App) serveMemberControl(ctx context.Context, conn net.Conn, peer members.MemberInfo) {
@@ -793,6 +812,7 @@ func (a *App) syncLoop(ctx context.Context) {
 		case <-ch:
 		}
 		if n := a.memberNode(); n != nil {
+			a.reconcileMembers()
 			SyncAll(ctx, n, a.logf())
 			a.mu.Lock()
 			a.mem.lastSync = time.Now()
@@ -844,10 +864,20 @@ func syncOnce(ctx context.Context, n *members.Node, id members.ID, ep members.En
 	return err
 }
 
-func (a *App) withNode(fn func(*members.Node) error) error {
+func (a *App) confirmMemberChange(detail string, fn func(*members.Node) error) error {
+	if !a.mem.changeMu.TryLock() {
+		return errors.New("另一个设备组修改正在等待处理")
+	}
+	defer a.mem.changeMu.Unlock()
 	n := a.memberNode()
 	if n == nil {
 		return errors.New("我的设备不可用")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, members.ApproveTimeout)
+	defer cancel()
+	ok, _ := a.ask(ctx, PromptDTO{Kind: "change", Detail: detail})
+	if !ok || ctx.Err() != nil {
+		return errors.New("未在本机确认修改")
 	}
 	err := fn(n)
 	a.SyncMembers()
@@ -860,50 +890,60 @@ func (a *App) RemoveMember(idStr string, rotate bool) error {
 	if err != nil {
 		return err
 	}
-	return a.withNode(func(n *members.Node) error { _, err := n.Remove(id, rotate); return err })
+	detail := fmt.Sprintf("从设备组移除「%s」（%s）", a.memberName(idStr), id.Short())
+	if rotate {
+		detail += "，并更换组密钥"
+	}
+	return a.confirmMemberChange(detail, func(n *members.Node) error { _, err := n.Remove(id, rotate); return err })
 }
 
 // RotateMemberKey replaces the group key.
 func (a *App) RotateMemberKey() error {
-	return a.withNode(func(n *members.Node) error { _, err := n.Rotate(); return err })
+	return a.confirmMemberChange("更换设备组密钥", func(n *members.Node) error { _, err := n.Rotate(); return err })
 }
 
 // SetMemberPolicy changes "允许我的设备直连", unattended access and
 // view-only for member sessions.
 func (a *App) SetMemberPolicy(p members.Policy) error {
-	return a.withNode(func(n *members.Node) error { return n.SetPolicy(p) })
+	state := func(on bool) string {
+		if on {
+			return "开启"
+		}
+		return "关闭"
+	}
+	detail := fmt.Sprintf("允许我的设备直连：%s；无人值守：%s；仅观看：%s", state(p.AllowInbound), state(p.Unattended), state(p.ViewOnly))
+	return a.confirmMemberChange(detail, func(n *members.Node) error { return n.SetPolicy(p) })
 }
 
 // LeaveMembers removes this device from its group, tells reachable
 // members, and deletes the local identity and keys.
 func (a *App) LeaveMembers() error {
-	n := a.memberNode()
-	if n == nil {
-		return errors.New("我的设备不可用")
-	}
-	if _, err := n.Leave(); err != nil && !errors.Is(err, members.ErrNotMember) {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
-	SyncAll(ctx, n, a.logf())
-	cancel()
-	return n.Forget()
+	return a.confirmMemberChange("退出设备组，通知可达设备后清除本机身份和密钥", func(n *members.Node) error {
+		if _, err := n.Leave(); err != nil && !errors.Is(err, members.ErrNotMember) {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+		defer cancel()
+		SyncAll(ctx, n, a.logf())
+		return n.Forget()
+	})
 }
 
 // RebuildMembers stops using a conflicted (or broken) group locally; pair
 // the devices to keep again afterwards.
 func (a *App) RebuildMembers() error {
-	return a.withNode(func(n *members.Node) error { return n.Forget() })
+	return a.confirmMemberChange("停用旧设备组并清除本机身份和密钥", func(n *members.Node) error { return n.Forget() })
 }
 
 func (a *App) membersDTO() MembersDTO {
 	a.mu.Lock()
 	n := a.mem.node
-	d := MembersDTO{Error: a.mem.err, Pairing: a.mem.pairing, LastSync: a.mem.lastSync, Serving: len(a.mem.lns) > 0}
+	d := MembersDTO{Error: a.mem.err, Pairing: a.mem.pairing, LastSync: a.mem.lastSync, Serving: a.mem.serving}
 	for _, p := range a.mem.prompts {
 		d.Prompts = append(d.Prompts, p.dto)
 	}
 	a.mu.Unlock()
+	slices.SortFunc(d.Prompts, func(a, b PromptDTO) int { return cmp.Compare(a.ID, b.ID) })
 	if n == nil {
 		return d
 	}
@@ -948,43 +988,49 @@ func ServeMembers(ctx context.Context, h *host.Server, logf func(string, ...any)
 	if err != nil {
 		return err
 	}
+	return serveMemberNode(ctx, n, h, logf)
+}
+
+func serveMemberNode(ctx context.Context, n *members.Node, h *host.Server, logf func(string, ...any)) error {
 	if err := n.Err(); err != nil {
 		return err
 	}
 	if !n.Snapshot().InGroup || !n.Policy().AllowInbound {
 		return errors.New("本机未加入设备组或未开启「允许我的设备直连」，请先在桌面应用中配对")
 	}
-	eps := n.ListenEndpoints()
-	if len(eps) == 0 {
+	if len(n.ListenEndpoints()) == 0 {
 		return errors.New("本机还没有成员地址：请先在桌面应用中开启远程控制并完成一次同步")
 	}
-	cfg, err := n.ServerTLS()
-	if err != nil {
-		return err
+	changed := make(chan struct{}, 1)
+	n.Changed = func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
 	}
 	control := func(ctx context.Context, conn net.Conn, peer members.MemberInfo) {
 		h.ServeMember(ctx, conn, host.MemberPeer{ID: peer.ID.String(), Name: peer.Name, ViewOnly: n.Policy().ViewOnly})
 	}
-	for _, ep := range eps {
-		ln, err := tunnel.ListenMember(ctx, ep.MemberEndpoint, logf)
-		if err != nil {
+	listeners := memberListeners{}
+	defer listeners.close()
+	defer n.DisconnectAll()
+	refresh := func() error {
+		if err := n.Maintain(); err != nil {
 			return err
 		}
-		var ctl members.ControlHandler
-		if ep.Control {
-			ctl = control
-		}
-		srv := &http.Server{Handler: n.Handler(ctl), ReadHeaderTimeout: 10 * time.Second}
-		go srv.Serve(tls.NewListener(ln, cfg))
-		defer srv.Close()
-		defer ln.Close()
+		return listeners.reconcile(ctx, n, n.ListenEndpoints(), control, logf)
+	}
+	if err := refresh(); err != nil && len(listeners) == 0 {
+		return err
 	}
 	mode := "每次连接需本机确认，命令行无法确认，因此会被拒绝"
 	if n.Policy().Unattended {
 		mode = "无人值守"
 	}
-	log.Printf("我的设备：已在 %d 个成员地址上监听（%s）", len(eps), mode)
+	log.Printf("我的设备：已在 %d 个成员地址上监听（%s）", len(listeners), mode)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(3 * time.Minute)
 		defer t.Stop()
 		for {
@@ -993,12 +1039,21 @@ func ServeMembers(ctx context.Context, h *host.Server, logf func(string, ...any)
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				n.Changed() // expire transitions and retry failed listeners even with no peers
 			}
 		}
 	}()
-	<-ctx.Done()
-	n.DisconnectAll()
-	return nil
+	for {
+		select {
+		case <-changed:
+			if err := refresh(); err != nil {
+				log.Printf("更新成员监听失败：%v", err)
+			}
+		case <-ctx.Done():
+			<-done
+			return nil
+		}
+	}
 }
 
 func userConfigDir() (string, error) {

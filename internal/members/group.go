@@ -490,7 +490,8 @@ func (g *Group) ApplyAck(r Signed) (Ack, error) {
 	if !ok {
 		return a, errors.New("确认者在该历史处不是成员")
 	}
-	if k := g.keyIndex(a.KeyVersion); k < 0 || k > at {
+	// A zero version is a signed request from a member missing its key.
+	if k := g.keyIndex(a.KeyVersion); !a.KeyVersion.IsZero() && (k < 0 || k > at) {
 		return a, errors.New("确认的密钥版本与历史不相容")
 	}
 	if err := r.verify(pub); err != nil {

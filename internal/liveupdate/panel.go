@@ -36,12 +36,21 @@ func (p *Panel) ResumingSessions() bool {
 }
 
 func (p *Panel) Sync() (Reply, error) {
+	// Poll concurrently with a settings request waiting for local approval.
+	r, err := p.call(Request{Op: "state"})
+	if err == nil && (r.Version == core.App().Version || r.Windows > 0 || len(r.State.Viewers) > 0 || len(r.State.Members.Prompts) > 0) {
+		return r, nil
+	}
+	if err != nil && !missingEndpoint(err) {
+		return r, err
+	}
+	// Recheck under the exclusive lock before replacing or starting a worker.
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.stopped {
 		return Reply{}, errors.New("会话服务已退出")
 	}
-	r, err := exchange(Request{Op: "state"})
+	r, err = exchange(Request{Op: "state"})
 	if err != nil && !missingEndpoint(err) {
 		return r, err
 	}

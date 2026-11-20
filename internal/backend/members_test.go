@@ -76,8 +76,10 @@ func TestMemberSessionEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	finished := make(chan struct{}, 2)
 	srv := &http.Server{Handler: desk.Handler(func(ctx context.Context, conn net.Conn, p members.MemberInfo) {
 		h.ServeMember(ctx, conn, host.MemberPeer{ID: p.ID.String(), Name: p.Name, ViewOnly: true})
+		finished <- struct{}{}
 	})}
 	go srv.Serve(tls.NewListener(ln, cfg))
 	defer srv.Close()
@@ -118,6 +120,26 @@ func TestMemberSessionEndToEnd(t *testing.T) {
 	if len(h.Sessions()) != 1 {
 		t.Fatal("member session ended with the device code")
 	}
+	// A normal WebSocket close releases the hijacked HTTP listener.
+	r.Close()
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("member handler survived a normal disconnect")
+	}
+	raw, err = net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err = phone.DialControl(ctx, raw, deskID.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err = sessionOver(ctx, conn, nil, client.Config{}, client.Handler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
 	// Removing the phone ends its live session.
 	if _, err := desk.Remove(MemberIDOf(phone), false); err != nil {
 		t.Fatal(err)
@@ -195,15 +217,16 @@ func TestMembersTailcat(t *testing.T) {
 	if len(eps) != 1 || !eps[0].Control {
 		t.Fatalf("desktop endpoints: %d", len(eps))
 	}
-	cfg, _ := desk.ServerTLS()
-	ln, err := tunnel.ListenMember(ctx, eps[0].MemberEndpoint, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	srv := &http.Server{Handler: desk.Handler(nil)}
-	go srv.Serve(tls.NewListener(ln, cfg))
-	defer srv.Close()
+	// Exercise the same listener lifecycle as host -members.
+	hostCtx, stopHost := context.WithCancel(ctx)
+	hostDone := make(chan error, 1)
+	go func() { hostDone <- serveMemberNode(hostCtx, desk, &host.Server{}, func(string, ...any) {}) }()
+	defer func() {
+		stopHost()
+		if err := <-hostDone; err != nil {
+			t.Error(err)
+		}
+	}()
 	dial := phone.DialEndpoints(MemberIDOf(desk))
 	if len(dial) == 0 {
 		t.Fatal("pairing did not carry the desktop's address")
@@ -213,16 +236,86 @@ func TestMembersTailcat(t *testing.T) {
 	if a1 != a2 {
 		t.Fatal("phone and desktop derive different member addresses")
 	}
-	tc, err := tunnel.DialMember(ctx, dial[0].MemberEndpoint, nil)
-	if err != nil {
+	// A listener can still be starting while we hold its advertised address.
+	syncUntilReady := func(ep members.Endpoint) {
+		t.Helper()
+		var err error
+		for ctx.Err() == nil {
+			attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err = syncOnce(attempt, phone, MemberIDOf(desk), ep, nil)
+			cancel()
+			if err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		t.Fatalf("member listener did not become reachable: %v", err)
+	}
+	syncUntilReady(dial[0])
+	if _, err := phone.Rotate(); err != nil {
 		t.Fatal(err)
 	}
-	defer tc.Close()
-	raw, err := tc.DialContext(ctx, "tcp", "")
-	if err != nil {
+	eps = phone.DialEndpoints(MemberIDOf(desk))
+	if len(eps) != 2 {
+		t.Fatalf("wanted two generations, got %d", len(eps))
+	}
+	// The final ack may retire the old transport while sync is finishing.
+	attempt, cancelAttempt := context.WithTimeout(ctx, 15*time.Second)
+	syncOnce(attempt, phone, MemberIDOf(desk), eps[1], nil)
+	cancelAttempt()
+	syncUntilReady(eps[0])
+}
+
+func TestMemberChangesRequireLocalApproval(t *testing.T) {
+	n := testNode(t)
+	if _, err := n.CreateGroup(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := phone.DialSync(ctx, raw, MemberIDOf(desk)); err != nil {
-		t.Fatal(err)
+	a := &App{ctx: context.Background()}
+	a.mem.node = n
+	a.host = &host.Server{}
+	policy := members.Policy{AllowInbound: true, Unattended: true}
+	a.UIAttached = func() bool { return false }
+	for _, change := range []func() error{func() error { return a.SetMemberPolicy(policy) }, a.LeaveMembers, a.RebuildMembers, a.RotateMemberKey} {
+		if err := change(); err == nil {
+			t.Fatal("headless change accepted")
+		}
+	}
+	if !n.Snapshot().InGroup || n.Policy() == policy {
+		t.Fatal("unconfirmed change persisted")
+	}
+	a.UIAttached = func() bool { return true }
+	changed := make(chan struct{}, 1)
+	a.OnChange = func() {
+		select {
+		case changed <- struct{}{}:
+		default:
+		}
+	}
+	for _, allow := range []bool{false, true} {
+		done := make(chan error, 1)
+		go func() { done <- a.SetMemberPolicy(policy) }()
+		var prompt PromptDTO
+		timer := time.NewTimer(2 * time.Second)
+		for prompt.ID == 0 {
+			select {
+			case <-changed:
+				if ps := a.membersDTO().Prompts; len(ps) > 0 {
+					prompt = ps[0]
+				}
+			case <-timer.C:
+				t.Fatal("no settings confirmation")
+			}
+		}
+		timer.Stop()
+		if prompt.Kind != "change" || prompt.Detail == "" || !a.host.InputPaused() || n.Policy() == policy {
+			t.Fatal("invalid settings prompt")
+		}
+		if err := a.AnswerPrompt(prompt.ID, allow, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; (err == nil) != allow || (n.Policy() == policy) != allow || a.host.InputPaused() {
+			t.Fatal("local decision not applied", err)
+		}
 	}
 }

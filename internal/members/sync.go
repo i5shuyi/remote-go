@@ -75,6 +75,9 @@ func (n *Node) myHead() (syncHead, error) {
 func (n *Node) dataFor(peerHead ID) syncData {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if n.g == nil {
+		return syncData{}
+	}
 	d := syncData{Records: n.g.Suffix(peerHead), Conflict: n.g.Conflict()}
 	d.Profiles, d.Acks, d.Receipts = n.g.Extras()
 	return d
@@ -128,7 +131,7 @@ func (n *Node) newAck() *Signed {
 	}
 	held := n.f.KeyCurrent
 	if _, ok := n.k[held]; !ok {
-		return nil
+		held = ID{}
 	}
 	a, err := n.g.NewAck(n.self, held)
 	if err != nil {
@@ -228,17 +231,26 @@ func (n *Node) sync(fr *frames, peer ID) (SyncResult, error) {
 	if err := fr.exchange(syncFinal{Ack: n.newAck(), Receipts: n.receiptFor(peer)}, &final); err != nil {
 		return res, err
 	}
-	n.applyAck(peer, final.Ack)
+	finalAck, acknowledged := n.applyAck(peer, final.Ack)
 	n.mu.Lock()
+	defer n.mu.Unlock()
 	for _, r := range final.Receipts {
 		if n.g != nil {
 			n.g.ApplyReceipt(r)
 		}
 	}
-	if n.g != nil {
-		n.commitLocked(nil)
+	if n.g == nil {
+		return res, ErrNotMember
 	}
-	n.mu.Unlock()
+	if err := n.commitLocked(nil); err != nil {
+		return res, err
+	}
+	if n.g.Conflict() == nil {
+		state := n.g.State()
+		if _, held := n.k[state.KeyVersion]; !held || !acknowledged || finalAck.KeyVersion != state.KeyVersion || finalAck.Head != state.Head {
+			return res, errors.New("等待同步：双方尚未确认当前历史和组密钥")
+		}
+	}
 	return res, nil
 }
 
@@ -252,13 +264,22 @@ type ControlHandler func(ctx context.Context, conn net.Conn, peer MemberInfo)
 // Handler serves the member routes. The listener must wrap connections
 // with ServerTLS.
 func (n *Node) Handler(control ControlHandler) http.Handler {
+	return n.handler(nil, control)
+}
+
+// EndpointHandler binds control authorization to the address that received the request.
+func (n *Node) EndpointHandler(ep Endpoint, control ControlHandler) http.Handler {
+	return n.handler(&ep, control)
+}
+
+func (n *Node) handler(ep *Endpoint, control ControlHandler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET "+SyncPath, func(w http.ResponseWriter, r *http.Request) { n.serve(w, r, PurposeSync, nil) })
-	mux.HandleFunc("GET "+ControlPath, func(w http.ResponseWriter, r *http.Request) { n.serve(w, r, PurposeControl, control) })
+	mux.HandleFunc("GET "+SyncPath, func(w http.ResponseWriter, r *http.Request) { n.serve(w, r, PurposeSync, nil, nil) })
+	mux.HandleFunc("GET "+ControlPath, func(w http.ResponseWriter, r *http.Request) { n.serve(w, r, PurposeControl, ep, control) })
 	return mux
 }
 
-func (n *Node) serve(w http.ResponseWriter, r *http.Request, purpose string, control ControlHandler) {
+func (n *Node) serve(w http.ResponseWriter, r *http.Request, purpose string, ep *Endpoint, control ControlHandler) {
 	if r.TLS == nil || r.Header.Get("Upgrade") != upgradeName {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -297,18 +318,19 @@ func (n *Node) serve(w http.ResponseWriter, r *http.Request, purpose string, con
 		reject("等待同步")
 		return
 	}
-	n.serveControl(ctx, cancel, conn, brw.Reader, fr, peer, control, reject)
+	n.serveControl(ctx, cancel, conn, brw.Reader, fr, peer, ep, control, reject)
 }
 
 func (n *Node) serveControl(ctx context.Context, cancel context.CancelFunc, conn net.Conn, br *bufio.Reader, fr *frames,
-	peer ID, control ControlHandler, reject func(string)) {
+	peer ID, ep *Endpoint, control ControlHandler, reject func(string)) {
 	if control == nil {
 		reject("被拒绝")
 		return
 	}
 	// Pending approval is itself a registered connection, so a removal or
 	// closing inbound cancels it.
-	release, err := n.Register(peer, PurposeControl, true, func() { cancel(); conn.Close() })
+	s := &session{member: peer, purpose: PurposeControl, inbound: true, endpoint: ep, cancel: func() { cancel(); conn.Close() }}
+	release, err := n.register(s)
 	if err != nil {
 		reject(err.Error())
 		return
@@ -332,7 +354,7 @@ func (n *Node) serveControl(ctx context.Context, cancel context.CancelFunc, conn
 	}
 	release()
 	// A late approval after revocation fails here.
-	release, err = n.Register(peer, PurposeControl, true, func() { cancel(); conn.Close() })
+	release, err = n.register(s)
 	if err != nil {
 		reject(err.Error())
 		return
@@ -394,6 +416,8 @@ func (n *Node) upgrade(ctx context.Context, raw net.Conn, target ID, purpose, pa
 // endpoints).
 func (n *Node) DialSync(ctx context.Context, raw net.Conn, target ID) (SyncResult, error) {
 	defer raw.Close()
+	stop := context.AfterFunc(ctx, func() { raw.Close() })
+	defer stop()
 	tc, fr, _, err := n.upgrade(ctx, raw, target, PurposeSync, SyncPath)
 	if err != nil {
 		return SyncResult{}, err
@@ -405,9 +429,17 @@ func (n *Node) DialSync(ctx context.Context, raw net.Conn, target ID) (SyncResul
 // DialControl syncs, then asks target for control. On success the
 // returned connection carries the desktop protocol.
 func (n *Node) DialControl(ctx context.Context, raw net.Conn, target ID) (net.Conn, error) {
-	tc, fr, br, err := n.upgrade(ctx, raw, target, PurposeControl, ControlPath)
+	release, err := n.Register(target, PurposeControl, false, func() { raw.Close() })
 	if err != nil {
 		raw.Close()
+		return nil, err
+	}
+	stop := context.AfterFunc(ctx, func() { raw.Close() })
+	defer stop()
+	tracked := &registeredConn{Conn: raw, release: release}
+	tc, fr, br, err := n.upgrade(ctx, tracked, target, PurposeControl, ControlPath)
+	if err != nil {
+		tracked.Close()
 		return nil, err
 	}
 	if _, err := n.sync(fr, target); err != nil {
@@ -433,4 +465,15 @@ func (n *Node) DialControl(ctx context.Context, raw net.Conn, target ID) (net.Co
 	}
 	deadline(tc, 0)
 	return &bufConn{Conn: tc, r: br}, nil
+}
+
+// registeredConn releases the node's authorization entry when TLS closes the transport.
+type registeredConn struct {
+	net.Conn
+	release func()
+}
+
+func (c *registeredConn) Close() error {
+	c.release()
+	return c.Conn.Close()
 }

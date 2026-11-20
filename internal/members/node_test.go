@@ -162,6 +162,11 @@ func TestPairRetryIdempotent(t *testing.T) {
 // serve runs d's member handler on a local TLS listener.
 func serve(t *testing.T, d *dev, control ControlHandler) string {
 	t.Helper()
+	return serveHandler(t, d, d.Handler(control))
+}
+
+func serveHandler(t *testing.T, d *dev, handler http.Handler) string {
+	t.Helper()
 	cfg, err := d.ServerTLS()
 	if err != nil {
 		t.Fatal(err)
@@ -170,7 +175,7 @@ func serve(t *testing.T, d *dev, control ControlHandler) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: d.Handler(control)}
+	srv := &http.Server{Handler: handler}
 	go srv.Serve(tls.NewListener(ln, cfg))
 	t.Cleanup(func() { srv.Close() })
 	return ln.Addr().String()
@@ -494,5 +499,166 @@ func TestPairPeerCancelClosesPrompt(t *testing.T) {
 	}
 	if b.Snapshot().InGroup || a.Snapshot().InGroup {
 		t.Fatal("authorization added")
+	}
+}
+
+func TestSameGroupRecovery(t *testing.T) {
+	a, b := newDev(t, "A"), newDev(t, "B")
+	yes := [2]bool{true, true}
+	if o := pair(t, a, b, yes, true); o.dial != nil || o.serv != nil {
+		t.Fatal(o.dial, o.serv)
+	}
+	loseKey := func(d *dev) *dev {
+		v, _ := d.HeldKey()
+		if err := d.keys.Delete(KeySlot(d.Snapshot().Group, v)); err != nil {
+			t.Fatal(err)
+		}
+		return reopen(t, d)
+	}
+	a = loseKey(a)
+	o := pair(t, a, b, yes, true)
+	if o.dial != nil || o.serv != nil || o.codes[0] == "" || o.codes[0] != o.codes[1] {
+		t.Fatalf("recovery: %+v", o)
+	}
+	a = reopen(t, a)
+	if _, held := a.HeldKey(); !held || a.Err() != nil {
+		t.Fatal("recovered key not persisted")
+	}
+	a, b = loseKey(a), loseKey(b)
+	if o := pair(t, b, a, yes, true); o.dial == nil || o.serv == nil {
+		t.Fatal("recovery succeeded without any source of the key")
+	}
+}
+
+func TestLeaveAnnouncesRemoval(t *testing.T) {
+	a, b := newDev(t, "A"), newDev(t, "B")
+	if o := pair(t, a, b, [2]bool{true, true}, true); o.dial != nil {
+		t.Fatal(o.dial)
+	}
+	if err := b.SetProfile("Desk", "darwin", true, &Relay{Region: 301}); err != nil {
+		t.Fatal(err)
+	}
+	addr := serve(t, b, nil)
+	if _, err := dialSync(t, a, addr, b.id()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Leave(); err != nil {
+		t.Fatal(err)
+	}
+	eps := a.DialEndpoints(b.id())
+	if len(eps) != 1 || eps[0].Control || len(a.ListenEndpoints()) != 0 {
+		t.Fatal("leaving requires a sync-only outbound address")
+	}
+	// The peer closes the sync connection as soon as it commits our removal.
+	dialSync(t, a, addr, b.id())
+	if memberRow(b.Snapshot(), a.id()).ID == a.id() {
+		t.Fatal("peer did not persist departure")
+	}
+}
+
+func TestControlRegistration(t *testing.T) {
+	for _, action := range []string{"remove while waiting", "remove while active", "rotate", "change relay"} {
+		t.Run(action, func(t *testing.T) {
+			a, b := newDev(t, "A"), newDev(t, "B")
+			if o := pair(t, a, b, [2]bool{true, true}, true); o.dial != nil {
+				t.Fatal(o.dial)
+			}
+			if err := b.SetProfile("B", "darwin", true, &Relay{Region: 301}); err != nil {
+				t.Fatal(err)
+			}
+			prompt, answer := make(chan struct{}, 1), make(chan struct{})
+			b.Approve = func(ctx context.Context, _ MemberInfo) bool {
+				prompt <- struct{}{}
+				select {
+				case <-ctx.Done():
+					return false
+				case <-answer:
+					return true
+				}
+			}
+			ep := b.ListenEndpoints()[0]
+			handler := b.EndpointHandler(ep, func(ctx context.Context, conn net.Conn, _ MemberInfo) { io.Copy(io.Discard, conn) })
+			addr := serveHandler(t, b, handler)
+			dial := func() (net.Conn, error) {
+				raw, err := net.Dial("tcp", addr)
+				if err != nil {
+					return nil, err
+				}
+				return a.DialControl(context.Background(), raw, b.id())
+			}
+			if action == "remove while waiting" {
+				done := make(chan error, 1)
+				go func() { _, err := dial(); done <- err }()
+				defer close(answer)
+				select {
+				case <-prompt:
+				case <-time.After(3 * time.Second):
+					t.Fatal("no approval prompt")
+				}
+				if _, err := a.Remove(b.id(), false); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case err := <-done:
+					if err == nil {
+						t.Fatal("revoked request approved")
+					}
+				case <-time.After(3 * time.Second):
+					t.Fatal("outbound approval still waiting")
+				}
+				return
+			}
+			close(answer)
+			conn, err := dial()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			switch action {
+			case "remove while active":
+				_, err = a.Remove(b.id(), false)
+			case "rotate":
+				_, err = b.Rotate()
+			case "change relay":
+				err = b.SetProfile("B", "darwin", true, &Relay{Region: 302})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if _, err := conn.Read(make([]byte, 1)); err == nil {
+				t.Fatal("revoked connection still readable")
+			} else if e, ok := err.(net.Error); ok && e.Timeout() {
+				t.Fatal("connection survived until read deadline")
+			}
+			if action != "remove while active" {
+				if _, err := dialSync(t, a, addr, b.id()); err != nil {
+					t.Fatal("old endpoint must still sync", err)
+				}
+				if c, err := dial(); err == nil {
+					c.Close()
+					t.Fatal("old endpoint still granted control")
+				}
+			}
+		})
+	}
+}
+
+func TestPairPromptHasOwnDeadline(t *testing.T) {
+	a, b := newDev(t, "A"), newDev(t, "B")
+	tokens := &TokenBook{}
+	c1, c2 := net.Pipe()
+	done := make(chan error, 1)
+	bounded := make(chan bool, 1)
+	go func() {
+		done <- b.PairServe(context.Background(), c2, tokens, PairOptions{Confirm: func(ctx context.Context, _ PairPrompt) (bool, bool) {
+			end, ok := ctx.Deadline()
+			bounded <- ok && time.Until(end) > 0 && time.Until(end) <= PairConfirmTime
+			return false, false
+		}})
+	}()
+	a.PairDial(context.Background(), c1, tokens.Issue("s"), PairOptions{Confirm: func(context.Context, PairPrompt) (bool, bool) { return true, false }})
+	if err := <-done; err == nil || !<-bounded {
+		t.Fatal("receiving desktop prompt requires a bounded local deadline")
 	}
 }

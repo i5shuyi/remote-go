@@ -75,7 +75,6 @@ func platformName(d backend.DeviceDTO) string {
 func (g *gui) devices(cx *core.Scope) core.Node {
 	pairOpen := core.NewSignal(cx, false)
 	removing := core.NewSignal(cx, backend.DeviceDTO{})
-	leaving := core.NewSignal(cx, false)
 	connecting := core.NewSignal(cx, "") // the device being dialed
 	policy := func(change func(*members.Policy)) {
 		m := g.mem()
@@ -215,20 +214,12 @@ func (g *gui) devices(cx *core.Scope) core.Node {
 					row("更换组密钥", func() string { return "旧地址在所有设备签收新密钥前继续提供同步，最长 90 天" },
 						ui.Button{Text: "更换", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.RotateMemberKey, "已更换组密钥") }}),
 					row("退出设备组", func() string { return "通知可达的设备后清除本机的成员身份和密钥" },
-						ui.Button{Text: "退出", Variant: ui.ButtonOutline, OnPress: func() { leaving.Set(true) }}),
+						ui.Button{Text: "退出", Variant: ui.ButtonOutline, OnPress: func() { g.run(g.be.LeaveMembers, "已退出设备组") }}),
 				),
 			}}
 		}},
 		g.pairDialog(cx, pairOpen),
 		g.removeDialog(cx, removing),
-		ui.Dialog{
-			Open: leaving.Get, OnOpenChange: func(open bool, _ base.Reason) { leaving.Set(open) },
-			Title: "退出设备组？", Description: "本机将不再能免码连接其他设备。之后可以重新配对，以新身份加入。",
-			Footer: []core.Node{
-				ui.Button{Text: "取消", Variant: ui.ButtonOutline, OnPress: func() { leaving.Set(false) }},
-				ui.Button{Text: "退出", OnPress: func() { leaving.Set(false); g.run(g.be.LeaveMembers, "已退出设备组") }},
-			},
-		},
 	}}
 }
 
@@ -333,6 +324,9 @@ func (g *gui) promptDialog(cx *core.Scope) core.Node {
 		NoCloseOnBackdropPress: true,
 		TitleFunc: func() string {
 			p := current()
+			if p.Kind == "change" {
+				return "确认修改我的设备"
+			}
 			if p.Kind == "control" {
 				return "「" + p.Peer + "」请求控制本机"
 			}
@@ -341,6 +335,8 @@ func (g *gui) promptDialog(cx *core.Scope) core.Node {
 		DescriptionFunc: func() string {
 			p := current()
 			switch {
+			case p.Kind == "change":
+				return p.Detail
 			case p.Kind == "control":
 				return "这是你设备组中的设备（" + p.PeerShort + "）。允许后对方可以看到并操作本机屏幕。30 秒内未允许将自动拒绝。"
 			case p.Role == "recover":
@@ -361,7 +357,7 @@ func (g *gui) promptDialog(cx *core.Scope) core.Node {
 			}},
 		},
 		Footer: []core.Node{
-			core.Show{When: func() bool { return current().Kind == "control" }, Then: func(cx *core.Scope) core.Node {
+			core.Show{When: func() bool { return current().Kind == "control" || current().Kind == "change" }, Then: func(cx *core.Scope) core.Node {
 				return core.View{Class: "flex-row gap-2", Children: []core.Node{
 					ui.Button{Text: "拒绝", Variant: ui.ButtonOutline, OnPress: func() { answer(false) }},
 					ui.Button{Text: "允许", Color: brandBlue, OnPress: func() { answer(true) }},

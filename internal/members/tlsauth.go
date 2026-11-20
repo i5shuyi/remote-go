@@ -107,7 +107,7 @@ func (n *Node) authorizeOutbound(pub ed25519.PublicKey, purpose string) (ID, err
 	if errors.Is(err, ErrNotMember) && purpose == PurposeSync {
 		n.mu.Lock()
 		defer n.mu.Unlock()
-		if n.g != nil && n.g.State().Removed[n.self.ID()] && n.g.State().Active(id) {
+		if n.departing && n.g != nil && n.g.State().Removed[n.self.ID()] && n.g.State().Active(id) {
 			return id, nil
 		}
 	}
