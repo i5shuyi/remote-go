@@ -1,6 +1,6 @@
 name: Remote Go
 id: dev.remotego.app
-version: 0.5.2
+version: 0.5.3
 
 release:
   github: i5shuyi/remote-go
@@ -10,6 +10,7 @@ updates:
   key: Uq519xa4Yr2gx4E4PZ34BD2Yl22g1YsQ/M72398rmUY=
 apple:
   info:
+    NSScreenCaptureUsageDescription: Remote Go 需要在远程会话中共享这台 Mac 的屏幕。
     NSAppleEventsUsageDescription: Remote Go 需要控制键盘鼠标以响应远程操作。
 linux:
   categories: [Network, RemoteAccess]

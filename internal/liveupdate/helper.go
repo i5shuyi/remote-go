@@ -42,9 +42,7 @@ func windowHelper(name string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-// Stage materializes a copy of the installed, already verified executable.
-// On Windows an image mapped by a running process cannot be overwritten.
-// On macOS a stable path preserves the helper's identity across replacements.
+// Stage prepares the helper executable used by the session service.
 func Stage() (string, error) {
 	src, err := os.Executable()
 	if err != nil {
@@ -54,8 +52,13 @@ func Stage() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return stageHelper(src, dir)
+}
 
-	if err = os.MkdirAll(dir, 0700); err != nil {
+// stageExecutable is used on Windows and for standalone development executables.
+func stageExecutable(src, dir string) (string, error) {
+
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
 	in, err := os.Open(src)

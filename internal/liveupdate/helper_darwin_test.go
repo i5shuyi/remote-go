@@ -1,0 +1,58 @@
+package liveupdate
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+func TestStageSignedSessionBundle(t *testing.T) {
+	bundle := filepath.Join(t.TempDir(), "Source.app")
+	contents := filepath.Join(bundle, "Contents")
+	exe := filepath.Join(contents, "MacOS", "Remote Go")
+	if err := os.MkdirAll(filepath.Dir(exe), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("/bin/cp", "/usr/bin/true", exe).CombinedOutput(); err != nil {
+		t.Fatalf("copy executable: %v: %s", err, out)
+	}
+	cache := t.TempDir()
+	alias := filepath.Join(cache, "Remote Go Sessions")
+	if err := os.WriteFile(alias, []byte("old standalone helper"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"1", "2"} {
+		plist := fmt.Sprintf("<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>dev.remote-go.test</string><key>CFBundleExecutable</key><string>Remote Go</string><key>CFBundleVersion</key><string>%s</string></dict></plist>", version)
+		if err := os.WriteFile(filepath.Join(contents, "Info.plist"), []byte(plist), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("/usr/bin/codesign", "--force", "--sign", "-", bundle).CombinedOutput(); err != nil {
+			t.Fatalf("sign bundle: %v: %s", err, out)
+		}
+		path, err := stageHelper(exe, cache)
+		if err != nil || path != alias {
+			t.Fatalf("stage: %q, %v", path, err)
+		}
+		if err := verifyBundle(path); err != nil {
+			t.Fatal(err)
+		}
+		want, err := fileDigest(exe)
+		got, cachedErr := fileDigest(path)
+		if err != nil || cachedErr != nil || got != want {
+			t.Fatal("staged helper does not match the signed release")
+		}
+		before, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stageHelper(exe, cache); err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.Stat(path)
+		if err != nil || !os.SameFile(before, after) {
+			t.Fatal("replaced an identical signed helper on the next launch")
+		}
+	}
+}

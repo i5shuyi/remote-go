@@ -56,11 +56,6 @@ static int rg_ax_trusted(int prompt) {
 	return ok;
 }
 
-static int rg_screen_access(int request) {
-	if (CGPreflightScreenCaptureAccess()) return 1;
-	if (request) return CGRequestScreenCaptureAccess();
-	return 0;
-}
 */
 import "C"
 
@@ -106,9 +101,8 @@ type darwinInjector struct {
 }
 
 func newInjector() (Injector, error) {
-	if C.rg_screen_access(1) == 0 {
-		log.Printf("⚠️  未获得「屏幕录制」权限：系统设置 → 隐私与安全性 → 屏幕录制，勾选运行本程序的终端/应用后重启程序")
-	}
+	// The host creates its injector while listening. Screen recording is
+	// authorized by the capture API when an authenticated viewer needs frames.
 	if C.rg_ax_trusted(1) == 0 {
 		log.Printf("⚠️  未获得「辅助功能」权限：系统设置 → 隐私与安全性 → 辅助功能，勾选运行本程序的终端/应用（否则无法控制鼠标键盘）")
 	}
