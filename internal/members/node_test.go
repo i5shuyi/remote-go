@@ -400,15 +400,77 @@ func TestStoreCrashAndLock(t *testing.T) {
 	}
 }
 
+func TestSyncAfterPeerEnablesInbound(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "advertised relay"
+		if legacy {
+			name = "old profile without relay"
+		}
+		t.Run(name, func(t *testing.T) {
+			controller, desktop := newDev(t, "Controller"), newDev(t, "Desktop")
+			if o := pair(t, controller, desktop, [2]bool{true, true}, false); o.dial != nil || o.serv != nil {
+				t.Fatal(o.dial, o.serv)
+			}
+			home := Relay{Region: 304}
+			remote := Relay{Region: 303}
+			if legacy {
+				remote = home
+			}
+			if err := controller.SetProfile(controller.name, "darwin", &home); err != nil {
+				t.Fatal(err)
+			}
+			if err := desktop.SetProfile(desktop.name, "darwin", &remote); err != nil {
+				t.Fatal(err)
+			}
+			if !legacy {
+				// Share the signed off-state profile, including the remote's
+				// different relay, by the existing device-code recovery path.
+				if o := pair(t, controller, desktop, [2]bool{true, true}, false); o.dial != nil || o.serv != nil {
+					t.Fatal(o.dial, o.serv)
+				}
+			}
+			if len(desktop.ListenEndpoints()) != 0 || len(controller.DialEndpoints(desktop.id())) != 0 {
+				t.Fatal("disabled desktop accepted a listener or offered control")
+			}
+			if err := desktop.SetPolicy(Policy{AllowInbound: true}); err != nil {
+				t.Fatal(err)
+			}
+			desktop = reopen(t, desktop)
+			candidates, listeners := controller.SyncEndpoints(desktop.id()), desktop.ListenEndpoints()
+			if len(candidates) != 1 || len(listeners) != 1 || candidates[0].Control || candidates[0].Relay != remote {
+				t.Fatal("expected a sync-only candidate on the desktop relay")
+			}
+			dialAddr, err := candidates[0].Addr()
+			listenAddr, listenErr := listeners[0].Addr()
+			if err != nil || listenErr != nil || dialAddr != listenAddr {
+				t.Fatal("discovery did not reach the advertised listener")
+			}
+			if _, err := dialSync(t, controller, serve(t, desktop, nil), desktop.id()); err != nil {
+				t.Fatal(err)
+			}
+			endpoints := controller.DialEndpoints(desktop.id())
+			if !memberRow(controller.Snapshot(), desktop.id()).Inbound || len(endpoints) != 1 || !endpoints[0].Control {
+				t.Fatal("authenticated sync did not refresh the desktop entry")
+			}
+			if err := desktop.SetPolicy(Policy{}); err != nil {
+				t.Fatal(err)
+			}
+			if len(desktop.ListenEndpoints()) != 0 || memberRow(desktop.Snapshot(), desktop.id()).Inbound {
+				t.Fatal("disabling inbound did not immediately revoke listening and update the profile")
+			}
+		})
+	}
+}
+
 func TestEndpointsAndMigration(t *testing.T) {
 	a, b := newDev(t, "A"), newDev(t, "B")
 	pair(t, a, b, [2]bool{true, true}, true)
 	old := Relay{Region: 301}
-	if err := b.SetProfile("B", "darwin", true, &old); err != nil {
+	if err := b.SetProfile("B", "darwin", &old); err != nil {
 		t.Fatal(err)
 	}
 	nw := Relay{Address: "derp.example.com:8443"}
-	if err := b.SetProfile("B", "darwin", true, &nw); err != nil {
+	if err := b.SetProfile("B", "darwin", &nw); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Rotate(); err != nil {
@@ -535,7 +597,7 @@ func TestLeaveAnnouncesRemoval(t *testing.T) {
 	if o := pair(t, a, b, [2]bool{true, true}, true); o.dial != nil {
 		t.Fatal(o.dial)
 	}
-	if err := b.SetProfile("Desk", "darwin", true, &Relay{Region: 301}); err != nil {
+	if err := b.SetProfile("Desk", "darwin", &Relay{Region: 301}); err != nil {
 		t.Fatal(err)
 	}
 	addr := serve(t, b, nil)
@@ -563,7 +625,7 @@ func TestControlRegistration(t *testing.T) {
 			if o := pair(t, a, b, [2]bool{true, true}, true); o.dial != nil {
 				t.Fatal(o.dial)
 			}
-			if err := b.SetProfile("B", "darwin", true, &Relay{Region: 301}); err != nil {
+			if err := b.SetProfile("B", "darwin", &Relay{Region: 301}); err != nil {
 				t.Fatal(err)
 			}
 			prompt, answer := make(chan struct{}, 1), make(chan struct{})
@@ -620,7 +682,7 @@ func TestControlRegistration(t *testing.T) {
 			case "rotate":
 				_, err = b.Rotate()
 			case "change relay":
-				err = b.SetProfile("B", "darwin", true, &Relay{Region: 302})
+				err = b.SetProfile("B", "darwin", &Relay{Region: 302})
 			}
 			if err != nil {
 				t.Fatal(err)

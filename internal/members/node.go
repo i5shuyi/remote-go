@@ -315,6 +315,14 @@ func (n *Node) SetPolicy(p Policy) error {
 		return n.broken
 	}
 	old := n.f.Policy
+	// Keep the signed record and the switch in the same disk transaction.
+	if n.g != nil && n.g.State().Active(n.self.ID()) {
+		if profile, ok := n.g.Profile(n.self.ID()); ok && profile.Inbound != p.AllowInbound {
+			if _, err := n.g.NewProfile(n.self, profile.Name, profile.Platform, p.AllowInbound, profile.Relays); err != nil {
+				return err
+			}
+		}
+	}
 	n.f.Policy = p
 	if err := n.commitLocked(nil); err != nil {
 		n.f.Policy = old
@@ -510,12 +518,13 @@ func (n *Node) Maintain() error {
 // SetProfile publishes this device's self-description. A relay different
 // from the current first candidate starts a migration: the old one stays
 // as second candidate until every member has a receipt, or Transition.
-func (n *Node) SetProfile(name, platform string, inbound bool, relay *Relay) error {
+func (n *Node) SetProfile(name, platform string, relay *Relay) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if err := n.usableLocked(); err != nil {
 		return err
 	}
+	inbound := n.f.Policy.AllowInbound
 	var relays []Relay
 	old, had := n.g.Profile(n.self.ID())
 	if had {
@@ -536,9 +545,6 @@ func (n *Node) SetProfile(name, platform string, inbound bool, relay *Relay) err
 			}
 		}
 	}
-	if !inbound {
-		relays = nil
-	}
 	if had && old.Name == name && old.Platform == platform && old.Inbound == inbound && slices.Equal(old.Relays, relays) {
 		return nil
 	}
@@ -556,13 +562,22 @@ type Endpoint struct {
 	Control bool
 }
 
-func (n *Node) endpointsLocked(member ID) []Endpoint {
+func (n *Node) endpointsLocked(member ID, syncOnly bool) []Endpoint {
 	if n.broken != nil || n.keyErr != nil || !n.g.State().Active(member) {
 		return nil
 	}
 	p, ok := n.g.Profile(member)
-	if !ok || !p.Inbound {
+	if syncOnly && p.Platform == "android" || !syncOnly && (!ok || !p.Inbound) {
 		return nil
+	}
+	relays := p.Relays
+	// Older desktops erased their relay when switched off. Try our own
+	// home relay once when we have no route from the peer. Only a signed
+	// profile received over authenticated sync can enable its control entry.
+	if syncOnly && len(relays) == 0 {
+		if self, ok := n.g.Profile(n.self.ID()); ok && len(self.Relays) > 0 {
+			relays = self.Relays[:1]
+		}
 	}
 	var out []Endpoint
 	for _, v := range []ID{n.f.KeyCurrent, n.f.KeyPrev} {
@@ -570,11 +585,11 @@ func (n *Node) endpointsLocked(member ID) []Endpoint {
 		if !ok {
 			continue
 		}
-		for i, r := range p.Relays {
+		for i, r := range relays {
 			gid, ver, mid := n.g.ID(), v, member
 			out = append(out, Endpoint{
 				MemberEndpoint: tunnel.MemberEndpoint{GroupKey: k, GroupID: gid[:], KeyVersion: ver[:], MemberID: mid[:], Relay: r},
-				Control:        !n.departing && v == n.g.State().KeyVersion && i == 0,
+				Control:        !syncOnly && !n.departing && v == n.g.State().KeyVersion && i == 0,
 			})
 		}
 	}
@@ -588,17 +603,26 @@ func (n *Node) ListenEndpoints() []Endpoint {
 	if n.broken != nil || !n.f.Policy.AllowInbound || n.g == nil {
 		return nil
 	}
-	return n.endpointsLocked(n.self.ID())
+	return n.endpointsLocked(n.self.ID(), false)
 }
 
 // DialEndpoints are a member's known addresses, preferred first.
 func (n *Node) DialEndpoints(member ID) []Endpoint {
+	return n.dialEndpoints(member, false)
+}
+
+// SyncEndpoints also checks desktops whose last advertised inbound state was off.
+func (n *Node) SyncEndpoints(member ID) []Endpoint {
+	return n.dialEndpoints(member, true)
+}
+
+func (n *Node) dialEndpoints(member ID, syncOnly bool) []Endpoint {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.g == nil || member == n.self.ID() || (!n.departing && n.usableLocked() != nil) {
 		return nil
 	}
-	return n.endpointsLocked(member)
+	return n.endpointsLocked(member, syncOnly)
 }
 
 // MemberInfo is one row of the device list.

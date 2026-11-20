@@ -67,10 +67,19 @@ func platformName(d backend.DeviceDTO) string {
 		return "本机 · " + osName(d.Platform)
 	case !d.Inbound && d.Platform == "android":
 		return "Android · 仅控制端"
+	case !d.Inbound && d.Platform == "":
+		return cachedInboundStatus(d)
 	case !d.Inbound:
-		return osName(d.Platform) + " · 未开启直连"
+		return osName(d.Platform) + " · " + cachedInboundStatus(d)
 	}
 	return osName(d.Platform)
+}
+
+func cachedInboundStatus(d backend.DeviceDTO) string {
+	if d.Platform == "" {
+		return "等待同步设备信息"
+	}
+	return "上次同步时直连已关闭"
 }
 
 func (g *gui) devices(cx *core.Scope, selected *core.Signal[string]) core.Node {
@@ -180,7 +189,7 @@ func (g *gui) groupControls() core.Node {
 	}
 	inbound := func() bool { return g.mem().AllowInbound }
 	return section(textf("text-xs text-muted-foreground", func() string { return "设备组指纹 · " + g.mem().Group }),
-		row("允许我的设备直连", func() string {
+		row("允许我的设备直连本机", func() string {
 			switch m := g.mem(); {
 			case !g.st.Get().AllowControl:
 				return "「允许远程控制」已关闭，直连也随之停止"
@@ -190,7 +199,7 @@ func (g *gui) groupControls() core.Node {
 				return "正在启动成员监听…"
 			}
 			return "关闭时本机只能连接其他设备"
-		}, ui.Switch{Label: "允许我的设备直连", Checked: func() bool { return g.mem().AllowInbound },
+		}, ui.Switch{Label: "允许我的设备直连本机", Checked: func() bool { return g.mem().AllowInbound },
 			OnChange: func(on bool) {
 				policy(func(p *members.Policy) { p.AllowInbound = on; p.Unattended = p.Unattended && on })
 			}}),

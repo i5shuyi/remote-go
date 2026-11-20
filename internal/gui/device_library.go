@@ -147,7 +147,7 @@ func (g *gui) deviceLanding(cx *core.Scope, current func() backend.DeviceDTO, co
 							if g.mem().Conflict {
 								return "设备组连接已暂停"
 							}
-							return "此设备未开启直连"
+							return cachedInboundStatus(current())
 						})}}
 					}},
 				}}

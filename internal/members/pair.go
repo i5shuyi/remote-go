@@ -352,7 +352,9 @@ func (n *Node) invite(fr *frames, me Identity, joiner, txn ID, opts PairOptions)
 	}
 	group := n.g.ID()
 	n.mu.Unlock()
-	n.SetProfile(opts.Name, opts.Platform, n.inboundProfile(), opts.Relay)
+	if err := n.SetProfile(opts.Name, opts.Platform, opts.Relay); err != nil {
+		return err
+	}
 
 	var in pairIntent
 	if err := fr.exchange(pairGroup{Group: group}, &in); err != nil {
@@ -429,12 +431,6 @@ func (n *Node) addForPairing(me Identity, intent Signed, txn, joiner ID) pairDel
 	return pairDeliver{Genesis: &gen, History: n.g.History(), Profiles: profiles, Key: k}
 }
 
-func (n *Node) inboundProfile() bool {
-	n.mu.Lock()
-	defer n.mu.Unlock()
-	return n.f.Policy.AllowInbound
-}
-
 func (n *Node) join(fr *frames, me Identity, inviter, txn ID, opts PairOptions, inbound bool) error {
 	var pg pairGroup
 	if err := fr.recv(&pg); err != nil {
@@ -498,7 +494,9 @@ func (n *Node) join(fr *frames, me Identity, inviter, txn ID, opts PairOptions, 
 	if err != nil {
 		return err
 	}
-	n.SetProfile(opts.Name, opts.Platform, inbound, opts.Relay)
+	if err := n.SetProfile(opts.Name, opts.Platform, opts.Relay); err != nil {
+		return err
+	}
 	out := pairAck{Ack: n.newAck()}
 	n.mu.Lock()
 	if p, ok := n.g.ProfileRecord(me.ID()); ok {

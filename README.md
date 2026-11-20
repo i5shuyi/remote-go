@@ -100,7 +100,7 @@ RG_TAILCAT_HOST=1 go test ./internal/host -run TestServeTailcat -v -timeout 10m
 
 ```bash
 sh scripts/build.sh android
-adb install -r bin/build-android/0.5.1/releases/remote-go-0.5.1-android-arm64.apk
+adb install -r bin/build-android/0.5.2/releases/remote-go-0.5.2-android-arm64.apk
 ```
 
 Building the APK requires Python 3.9+, JDK 17+, Android SDK Platform 34 or later, and Build Tools 36+ with d8. Use `ANDROID_HOME` to specify the SDK location.
@@ -130,7 +130,7 @@ Each OS and architecture reads its own `appcast-<target>.xml` from the latest Gi
 
 GitHub Actions runs the Go tests and builds the eight preview packages for pull requests, pushes to `main`, and manual runs. Download the seven-day test artifact from the **Build and release** workflow. Preview APKs use a temporary signing identity.
 
-To release, commit the new `version` in `nsgo.yaml` and push the matching stable tag, for example `v0.5.1`. The tag workflow uses the `NSGO_UPDATES_KEY` and `ANDROID_SIGNING_PEM` Actions secrets for the existing update and APK signing identities. It verifies the signed files, checks all 28 draft assets, publishes the release as **Latest**, then downloads the public feeds and installers to verify them. Rerun a failed release job to resume its draft or recheck an already published version.
+To release, commit the new `version` in `nsgo.yaml` and push the matching stable tag, for example `v0.5.2`. The tag workflow uses the `NSGO_UPDATES_KEY` and `ANDROID_SIGNING_PEM` Actions secrets for the existing update and APK signing identities. It verifies the signed files, checks all 28 draft assets, publishes the release as **Latest**, then downloads the public feeds and installers to verify them. Rerun a failed release job to resume its draft or recheck an already published version.
 
 For a local signed build, run `sh scripts/build.sh release` on macOS with Go, the Xcode command line tools, NSIS and the Android tools listed above. The script reads the update key from `NSGO_UPDATES_KEY` or `~/.config/remote-go/updates.key`, and the APK signing identity from `.nsgo/android/debug.pem`. Keep independent backups of both private keys.
 

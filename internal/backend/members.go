@@ -234,8 +234,8 @@ func (a *App) reconcileMembers() {
 	if n == nil {
 		return
 	}
-	if _, ok := n.Self(); ok && relay != nil {
-		if err := n.SetProfile(name, runtime.GOOS, n.Policy().AllowInbound, relay); err != nil {
+	if _, ok := n.Self(); ok {
+		if err := n.SetProfile(name, runtime.GOOS, relay); err != nil {
 			log.Printf("更新本机自述失败：%v", err)
 		}
 	}
@@ -830,15 +830,24 @@ func SyncAll(ctx context.Context, n *members.Node, logf func(string, ...any)) {
 	sem := make(chan struct{}, 3)
 	var wg sync.WaitGroup
 	for _, m := range n.Snapshot().Members {
-		if m.Self || !m.Inbound {
+		endpoints := n.SyncEndpoints(m.ID)
+		if len(endpoints) == 0 {
 			continue
 		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(id members.ID) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			for _, ep := range n.DialEndpoints(id) {
+			for _, ep := range endpoints {
+				if ctx.Err() != nil {
+					return
+				}
 				c, cancel := context.WithTimeout(ctx, 20*time.Second)
 				err := syncOnce(c, n, id, ep, logf)
 				cancel()
