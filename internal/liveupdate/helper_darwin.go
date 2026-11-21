@@ -12,6 +12,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Launch from Contents/MacOS so NSBundle can identify the running process.
+// The protocol alias remains usable by workers from older releases.
+func sessionExecutable(alias string) (string, error) {
+	target, err := os.Readlink(alias)
+	if errors.Is(err, unix.EINVAL) { // standalone executable
+		return alias, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if filepath.Dir(target) != filepath.Join("Remote Go.app", "Contents", "MacOS") || filepath.Clean(target) != target {
+		return "", fmt.Errorf("unexpected session executable link %q", target)
+	}
+	return filepath.Join(filepath.Dir(alias), target), nil
+}
+
 func fileDigest(path string) ([sha256.Size]byte, error) {
 	var digest [sha256.Size]byte
 	f, err := os.Open(path)

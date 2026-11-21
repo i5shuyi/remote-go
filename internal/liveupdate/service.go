@@ -338,7 +338,11 @@ func exchange(q Request) (r Reply, err error) {
 	return
 }
 
-func start(helper, password string) error {
+func start(name, password string) error {
+	helper, err := windowHelper(name)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command(helper, "session-host")
 	cmd.Stderr = os.Stderr
 	in, err := cmd.StdinPipe()

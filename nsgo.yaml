@@ -1,6 +1,6 @@
 name: Remote Go
 id: dev.remotego.app
-version: 0.5.3
+version: 0.5.4
 
 release:
   github: i5shuyi/remote-go

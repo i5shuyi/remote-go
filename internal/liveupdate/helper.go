@@ -39,7 +39,7 @@ func windowHelper(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, name), nil
+	return sessionExecutable(filepath.Join(dir, name))
 }
 
 // Stage prepares the helper executable used by the session service.

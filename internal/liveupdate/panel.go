@@ -69,7 +69,7 @@ func (p *Panel) Sync() (Reply, error) {
 	nextStart := time.Now()
 	for time.Now().Before(deadline) {
 		if time.Now().After(nextStart) {
-			if err = start(p.helper, p.password); err != nil {
+			if err = start(filepath.Base(p.helper), p.password); err != nil {
 				return Reply{}, err
 			}
 			nextStart = time.Now().Add(time.Second)

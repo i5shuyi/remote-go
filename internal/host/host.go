@@ -559,17 +559,19 @@ func (ss *session) sendFrame(ctx context.Context, typ byte, data []byte) error {
 }
 
 func (ss *session) stream(ctx context.Context) {
+	var h264Err error
 	if ss.wantH264 {
 		err := ss.streamH264(ctx)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
+		h264Err = err
 		log.Printf("硬件编码不可用，回退到 JPEG：%v", err)
 	}
 	if ss.sendJSON(ctx, map[string]any{"t": "video", "codec": "jpeg"}) != nil {
 		return
 	}
-	ss.streamJPEG(ctx)
+	ss.streamJPEG(ctx, h264Err)
 }
 
 // streamH264 runs the hardware pipeline. It returns an error (so the caller
@@ -617,7 +619,7 @@ func (ss *session) pumpH264(ctx context.Context, v encoder.Video) (restart bool,
 	}
 }
 
-func (ss *session) streamJPEG(ctx context.Context) {
+func (ss *session) streamJPEG(ctx context.Context, h264Err error) {
 	var (
 		seed     = maphash.MakeSeed()
 		lastHash uint64
@@ -633,7 +635,11 @@ func (ss *session) streamJPEG(ctx context.Context) {
 			if !errShown {
 				errShown = true
 				log.Printf("截屏失败: %v", err)
-				msg, _ := json.Marshal(map[string]string{"t": "error", "msg": "截屏失败: " + err.Error()})
+				detail := "截屏失败: " + err.Error()
+				if h264Err != nil {
+					detail = fmt.Sprintf("H.264：%v；JPEG：%v", h264Err, err)
+				}
+				msg, _ := json.Marshal(map[string]string{"t": "error", "msg": detail})
 				ss.c.Write(ctx, websocket.MessageText, msg)
 			}
 		} else {

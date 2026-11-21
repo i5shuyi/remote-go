@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -15,10 +16,23 @@ func TestStageSignedSessionBundle(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(exe), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("/bin/cp", "/usr/bin/true", exe).CombinedOutput(); err != nil {
-		t.Fatalf("copy executable: %v: %s", err, out)
+	probe := exec.Command("/usr/bin/clang", "-framework", "Foundation", "-x", "objective-c", "-", "-o", exe)
+	probe.Stdin = strings.NewReader(`#import <Foundation/Foundation.h>
+int main(void) {
+	@autoreleasepool { puts(NSBundle.mainBundle.bundleIdentifier.UTF8String ?: "(none)"); }
+	return 0;
+}`)
+	if out, err := probe.CombinedOutput(); err != nil {
+		t.Fatalf("compile bundle identity probe: %v: %s", err, out)
 	}
-	cache := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	cache, err := runtimeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
 	alias := filepath.Join(cache, "Remote Go Sessions")
 	if err := os.WriteFile(alias, []byte("old standalone helper"), 0700); err != nil {
 		t.Fatal(err)
@@ -34,6 +48,13 @@ func TestStageSignedSessionBundle(t *testing.T) {
 		path, err := stageHelper(exe, cache)
 		if err != nil || path != alias {
 			t.Fatalf("stage: %q, %v", path, err)
+		}
+		launch, err := windowHelper(filepath.Base(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(launch).CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "dev.remote-go.test" {
+			t.Fatalf("running helper lost bundle identity: %v: %s", err, out)
 		}
 		if err := verifyBundle(path); err != nil {
 			t.Fatal(err)
